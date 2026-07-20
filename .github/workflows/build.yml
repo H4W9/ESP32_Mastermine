@@ -1,0 +1,188 @@
+name: Build Firmware
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']            # a v* tag push also cuts a release
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Create/refresh a GitHub release with the artifacts'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write           # needed by the (optional) release step
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pancake (ESP32-C5, 8 MB flash, PSRAM) - ST7796 320x480, FT6336
+          - board:     MARAUDER_PANCAKE
+            short:     pancake
+            fqbn:      "esp32:esp32:esp32c5:CDCOnBoot=default,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=8M,PSRAM=enabled,PartitionScheme=custom,UploadSpeed=921600"
+            tft_setup: User_Setup_marauder_pancake
+            max_size:  3604480    # ota_0 slot size (0x370000, from partitions.csv)
+
+          # V8 (ESP32-C5, 8 MB flash, PSRAM) - ILI9341 240x320, XPT2046
+          - board:     MARAUDER_V8
+            short:     v8
+            fqbn:      "esp32:esp32:esp32c5:CDCOnBoot=default,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=8M,PSRAM=enabled,PartitionScheme=custom,UploadSpeed=921600"
+            tft_setup: User_Setup_marauder_v8
+            max_size:  3604480    # ota_0 slot size (0x370000, from partitions.csv)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache ESP32 Arduino core
+        uses: actions/cache@v4
+        id: esp32-core-cache
+        with:
+          path: ~/.arduino15
+          key: esp32-core-${{ runner.os }}-${{ hashFiles('.github/workflows/build.yml') }}
+
+      - name: Install ESP32 Arduino core
+        if: steps.esp32-core-cache.outputs.cache-hit != 'true'
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls \
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+
+      - name: Restore arduino-cli config (cache hit path)
+        if: steps.esp32-core-cache.outputs.cache-hit == 'true'
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls \
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+      # Only ArduinoJson is external. HTTPClient / WiFiClientSecure / SD / SPIFFS
+      # / Wire come with the ESP32 core, and picojpeg is vendored in src/, which
+      # arduino-cli compiles automatically.
+      - name: Install libraries
+        run: |
+          arduino-cli lib update-index
+          arduino-cli lib install "ArduinoJson"
+
+      # Patched TFT_eSPI for the ESP32-C5 (same fork the Marauder build uses).
+      - name: Install TFT_eSPI (ESP32-C5 fork)
+        uses: actions/checkout@v4
+        with:
+          repository: H4W9/TFT_eSPI
+          ref: ESP32-C5
+          path: TFT_eSPI-ESP32-C5
+
+      # The TFT fork ships the driver, not the board User_Setup files. Copy the
+      # ones bundled in this repo into the library, then point the library's own
+      # User_Setup_Select.h at ours. We must EDIT that file (not overwrite it):
+      # its lower half is the driver-defines selector (#include ST7796_Defines.h,
+      # #define TFT_DRIVER ...) that supplies TFT_CASET/TFT_MADCTL/TFT_SWRST/etc.
+      # Overwriting it drops those defines and the build fails to compile.
+      - name: Select TFT User_Setup for ${{ matrix.board }}
+        run: |
+          cp User_Setup_*.h TFT_eSPI-ESP32-C5/
+          SEL=TFT_eSPI-ESP32-C5/User_Setup_Select.h
+          # Neutralise any board setup the fork ships as active, keep the rest.
+          sed -i -E 's|^[[:space:]]*#include <User_Setup|//#include <User_Setup|' "$SEL"
+          # Inject ours inside the USER_SETUP_LOADED guard, before the driver block.
+          sed -i "/#ifndef USER_SETUP_LOADED/a #include <${{ matrix.tft_setup }}.h>" "$SEL"
+          ls TFT_eSPI-ESP32-C5/User_Setup_*.h
+          echo '--- active includes in User_Setup_Select.h ---'
+          grep -nE '^[[:space:]]*#include <User_Setup' "$SEL" || true
+          echo '--- driver-defines block still present? ---'
+          grep -n 'ST7796_Defines\|TFT_DRIVER 0x7796' "$SEL" || true
+
+      # Arduino IDE can't inject git data. configs.h guards FW_COMMIT with
+      # #ifndef and defaults it to "dev", so rewriting that default is all this
+      # needs to do.
+      - name: Stamp commit SHA
+        env:
+          GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          SHORT=${GIT_SHA:0:7}
+          sed -i -E "s/#define FW_COMMIT[[:space:]]+\"[^\"]*\"/#define FW_COMMIT  \"$SHORT\"/" configs.h
+          grep FW_COMMIT configs.h
+
+      # configs.h selects the board by #define, so the matrix overrides it from
+      # the command line instead of editing the file.
+      - name: Compile ${{ matrix.board }}
+        run: |
+          arduino-cli compile \
+            --fqbn "${{ matrix.fqbn }}" \
+            --library "TFT_eSPI-ESP32-C5" \
+            --build-property "compiler.cpp.extra_flags=-D${{ matrix.board }}" \
+            --build-property "upload.maximum_size=${{ matrix.max_size }}" \
+            --output-dir "dist/${{ matrix.short }}" \
+            --warnings default \
+            .
+
+      # Rename to match the release template:
+      #   ESP32_Mastermine_v<ver>_<board>.bin  (+ _merged, bootloader, partitions)
+      # The app and merged images differ per board, so both carry the board name —
+      # otherwise the two matrix jobs would collide when the release step merges
+      # their artifacts. bootloader/partitions are byte-identical across the
+      # boards (same C5 FQBN + partitions.csv), so they stay unsuffixed.
+      - name: Rename binaries
+        id: bins
+        run: |
+          VER=$(grep -oP '#define\s+FW_VERSION\s+"\K[^"]+' configs.h)
+          VER_U=${VER//./_}
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          mkdir -p out
+          D="dist/${{ matrix.short }}"
+          B="ESP32_Mastermine_v${VER_U}_${{ matrix.short }}"
+          cp "$D/ESP32_Mastermine.ino.bin" "out/${B}.bin"
+          [ -f "$D/ESP32_Mastermine.ino.merged.bin" ]     && cp "$D/ESP32_Mastermine.ino.merged.bin"     "out/${B}_merged.bin"              || true
+          [ -f "$D/ESP32_Mastermine.ino.bootloader.bin" ] && cp "$D/ESP32_Mastermine.ino.bootloader.bin" "out/ESP32_Mastermine_bootloader.bin" || true
+          [ -f "$D/ESP32_Mastermine.ino.partitions.bin" ] && cp "$D/ESP32_Mastermine.ino.partitions.bin" "out/ESP32_Mastermine_partitions.bin" || true
+          ls -l out
+
+      - name: Upload ${{ matrix.short }} binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.short }}
+          path: out/*
+          if-no-files-found: error
+
+  # Optional release - on a v* tag push, or a manual run with release=true.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: meta
+        run: |
+          VER=$(grep -oP '#define\s+FW_VERSION\s+"\K[^"]+' configs.h)
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dl
+          merge-multiple: true
+
+      - name: Create / refresh release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ steps.meta.outputs.version }}"
+          gh release delete "$TAG" --yes || true
+          gh release create "$TAG" dl/*.bin \
+            --title "$TAG" \
+            --notes "Automated build of Mastermine $TAG." \
+            --target "${{ github.sha }}"
