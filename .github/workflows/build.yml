@@ -32,11 +32,11 @@ jobs:
           # V8 (ESP32-C5, 8 MB flash, PSRAM) - ILI9341 240x320, XPT2046
           # Disabled for now; re-enable by uncommenting. The release job merges
           # whatever artifacts exist, so it keeps working with one board.
-          # - board:     MARAUDER_V8
-          #   short:     v8
-          #   fqbn:      "esp32:esp32:esp32c5:CDCOnBoot=default,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=8M,PSRAM=enabled,PartitionScheme=custom,UploadSpeed=921600"
-          #   tft_setup: User_Setup_marauder_v8
-          #   max_size:  3604480    # ota_0 slot size (0x370000, from partitions.csv)
+           - board:     MARAUDER_V8
+             short:     v8
+             fqbn:      "esp32:esp32:esp32c5:CDCOnBoot=default,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=8M,PSRAM=enabled,PartitionScheme=custom,UploadSpeed=921600"
+             tft_setup: User_Setup_marauder_v8
+             max_size:  3604480    # ota_0 slot size (0x370000, from partitions.csv)
 
     steps:
       - name: Checkout repository
