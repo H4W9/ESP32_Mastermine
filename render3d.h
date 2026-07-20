@@ -105,6 +105,11 @@ private:
     int8_t  sN;            // +1 if N points along +axis, -1 if -axis
     float   idet;          // 1 / (ux*vy - uy*vx), for picking
     float   shade;         // 0..1 Lambert term for the cap
+    // This face's shading tables, built once per frame. They live here rather
+    // than as one shared set because the draw loop is BLOCK-major: it visits
+    // f=0,1,2 for every block, so a single set with a "did the shade change"
+    // cache would miss on every single face and rebuild ~500 times a frame.
+    const uint16_t *lutR, *lutG, *lutB;
     // How the square texture is laid onto this face's tiles. Each is one of
     // AX_U / AX_U_INV / AX_V / AX_V_INV. Fixed to the face by geometry.
     int8_t  txSrc, tySrc;
@@ -120,7 +125,9 @@ private:
   // accumulates round-off that would slowly shear the cube.
   void renormalise();
   void project();
-  void buildShadeLut(float shade);
+  // Build face `f`'s shading tables and point its FaceProj at them. Called
+  // once per visible face per frame, never from the inner loop.
+  void buildShadeLut(uint8_t f, float shade);
   // Draw every shell block as a solid cube, back to front.
   void paintBlocks();
   // Textured parallelogram at (px,py) spanned by (ax,ay) and (bx,by). When
@@ -151,14 +158,11 @@ private:
   float _sonarFade = 0.0f;         // sampled once per frame
 
   FaceProj _fp[CUBE_FACES];
-  // Shading tables. Each entry is that channel's PRE-SHIFTED contribution to a
-  // BYTE-SWAPPED RGB565 word, so `_lutR[r] | _lutG[g] | _lutB[b]` is already in
-  // the order a TFT_eSprite buffer wants — see the note on buildShadeLut().
-  uint16_t _lutR[32], _lutG[64], _lutB[32];
-  // Which shade the LUTs currently hold, as a 0..255 key. Signed with -1 for
-  // "nothing loaded": an unsigned sentinel of 255 would collide with a fully
-  // lit face and silently skip its rebuild.
-  int16_t  _lutShade = -1;
+  // Shading tables, one set per face. Each entry is that channel's PRE-SHIFTED
+  // contribution to a BYTE-SWAPPED RGB565 word, so `lutR[r]|lutG[g]|lutB[b]`
+  // is already in the order a TFT_eSprite buffer wants — see buildShadeLut().
+  // 1536 bytes for all six, against rebuilding them hundreds of times a frame.
+  uint16_t _lutR[CUBE_FACES][32], _lutG[CUBE_FACES][64], _lutB[CUBE_FACES][32];
 };
 
 #endif // render3d_h

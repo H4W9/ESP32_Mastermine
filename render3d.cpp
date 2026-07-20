@@ -268,47 +268,26 @@ void CubeView::chooseOrientation(FaceProj &p, const FaceBasis &b) {
 // word is ((G&7)<<13) | (B<<8) | (R<<3) | (G>>3), and each channel's share of
 // that can be pre-computed, so the inner loop is still three lookups and two
 // ORs.
-void CubeView::buildShadeLut(float shade) {
-  int16_t key = (int16_t)(shade * 255.0f + 0.5f);
-  if (key == _lutShade) return;
-  _lutShade = key;
+void CubeView::buildShadeLut(uint8_t f, float shade) {
   const uint16_t kr = (uint16_t)(shade * 256.0f);
   const uint16_t kg = (uint16_t)(powf(shade, SHADE_POW_G) * 256.0f);
   const uint16_t kb = (uint16_t)(powf(shade, SHADE_POW_B) * 256.0f);
   for (int i = 0; i < 32; i++) {
     uint16_t r = (uint16_t)((i * kr) >> 8);
     uint16_t b = (uint16_t)((i * kb) >> 8);
-    _lutR[i] = (uint16_t)(r << 3);
-    _lutB[i] = (uint16_t)(b << 8);
+    _lutR[f][i] = (uint16_t)(r << 3);
+    _lutB[f][i] = (uint16_t)(b << 8);
   }
   for (int i = 0; i < 64; i++) {
     uint16_t g = (uint16_t)((i * kg) >> 8);
-    _lutG[i] = (uint16_t)(((g & 0x7) << 13) | (g >> 3));
+    _lutG[f][i] = (uint16_t)(((g & 0x7) << 13) | (g >> 3));
   }
+  _fp[f].lutR = _lutR[f];
+  _fp[f].lutG = _lutG[f];
+  _fp[f].lutB = _lutB[f];
 }
 
-// Native RGB565 -> the byte order a TFT_eSprite buffer holds.
-static inline uint16_t sprSwap(uint16_t c) {
-  return (uint16_t)((c >> 8) | (c << 8));
-}
-
-// The same warm curve, applied directly to one colour — for the flat side
-// walls, which are painted in the tile's own hue so a teal block has teal
-// sides and a gold one gold sides.
-static inline uint16_t shadeWarm(uint16_t c, float s) {
-  const uint16_t kr = (uint16_t)(s * 256.0f);
-  const uint16_t kg = (uint16_t)(powf(s, SHADE_POW_G) * 256.0f);
-  const uint16_t kb = (uint16_t)(powf(s, SHADE_POW_B) * 256.0f);
-  uint16_t r = ((((c >> 11) & 0x1F) * kr) >> 8);
-  uint16_t g = ((((c >> 5) & 0x3F) * kg) >> 8);
-  uint16_t b = (((c & 0x1F) * kb) >> 8);
-  if (r > 31) r = 31;
-  if (g > 63) g = 63;
-  if (b > 31) b = 31;
-  return (uint16_t)((r << 11) | (g << 5) | b);
-}
-
-// Scanline solver shared by the textured cap and the flat side walls.
+// Scanline solver for a textured parallelogram.
 //
 // Per scanline we solve for the exact x range where both parallelogram
 // coordinates are inside [0,1) rather than testing every pixel in the bounding
@@ -360,25 +339,7 @@ static inline uint16_t shadeWarm(uint16_t c, float s) {
     if (xR > _vw - 1) xR = _vw - 1;                                            \
     if (xL > xR) continue;
 
-// Flat-shaded parallelogram, for the side walls of a raised block.
-void CubeView::fillPara(float px, float py, float ax, float ay,
-                        float bx, float by, uint16_t colour) {
-  R3D_SPAN_SETUP()
-  // One swap for the whole quad — the buffer is byte-reversed, see buildShadeLut.
-  colour = sprSwap(colour);
-  const int step = _fast ? 2 : 1;
-  for (int y = yTop; y <= yBot; y += step) {
-    R3D_SPAN_ROW(y)
-    uint16_t *dst = _buf + (size_t)y * _vw + xL;
-    for (int x = xL; x <= xR; x++) *dst++ = colour;
-    if (step == 2 && y + 1 <= yBot)
-      memcpy(_buf + (size_t)(y + 1) * _vw + xL,
-             _buf + (size_t)y * _vw + xL,
-             (size_t)(xR - xL + 1) * sizeof(uint16_t));
-  }
-}
-
-// Textured cap of a block, with the skin texture mapped affinely across it.
+// One face of a block, with the skin texture mapped affinely across it.
 void CubeView::paintTile(float px, float py, float ax, float ay, float bx, float by,
                          const FaceProj &fp, const uint16_t *tex, int ts,
                          const uint16_t *blendTex, uint8_t blendK) {
@@ -442,7 +403,7 @@ void CubeView::paintTile(float px, float py, float ax, float ay, float bx, float
         if (r > 31) r = 31;
         if (g > 63) g = 63;
         if (b > 31) b = 31;
-        *dst++ = (uint16_t)(_lutR[r] | _lutG[g] | _lutB[b]);
+        *dst++ = (uint16_t)(fp.lutR[r] | fp.lutG[g] | fp.lutB[b]);
         sx += dsx;
         sy += dsy;
       }
@@ -454,9 +415,9 @@ void CubeView::paintTile(float px, float py, float ax, float ay, float bx, float
         if (tu < 0) tu = 0; else if (tu >= ts) tu = ts - 1;
         if (tv < 0) tv = 0; else if (tv >= ts) tv = ts - 1;
         uint16_t c = tex[tv * ts + tu];
-        *dst++ = (uint16_t)(_lutR[(c >> 11) & 0x1F] |
-                            _lutG[(c >> 5) & 0x3F] |
-                            _lutB[c & 0x1F]);
+        *dst++ = (uint16_t)(fp.lutR[(c >> 11) & 0x1F] |
+                            fp.lutG[(c >> 5) & 0x3F] |
+                            fp.lutB[c & 0x1F]);
         sx += dsx;
         sy += dsy;
       }
@@ -472,7 +433,7 @@ void CubeView::paintTile(float px, float py, float ax, float ay, float bx, float
         uint16_t r = ((((a >> 11) & 0x1F) * ik) + (((b >> 11) & 0x1F) * k)) >> 8;
         uint16_t g = ((((a >> 5) & 0x3F) * ik) + (((b >> 5) & 0x3F) * k)) >> 8;
         uint16_t bl = (((a & 0x1F) * ik) + ((b & 0x1F) * k)) >> 8;
-        *dst++ = (uint16_t)(_lutR[r & 0x1F] | _lutG[g & 0x3F] | _lutB[bl & 0x1F]);
+        *dst++ = (uint16_t)(fp.lutR[r & 0x1F] | fp.lutG[g & 0x3F] | fp.lutB[bl & 0x1F]);
         sx += dsx;
         sy += dsy;
       }
@@ -517,11 +478,43 @@ void CubeView::paintBlocks() {
   const int fromY = (stepY > 0) ? 0 : n - 1, toY = (stepY > 0) ? n : -1;
   const int fromZ = (stepZ > 0) ? 0 : n - 1, toZ = (stepZ > 0) ? n : -1;
 
+  // THE INNER CUBE, and why it is not drawn.
+  //
+  // A solid cube fills the hollow centre, spanning [1-g, n-1+g] on every axis:
+  // flush with the inward faces of the shell blocks, its edges meeting the
+  // inside edges of the edge blocks. Without it you can see through the gaps
+  // between blocks, across the empty middle, and out at the far side.
+  //
+  // It is painted in the background colour — and the frame already began with
+  // fillSprite(bg), so drawing it would write exactly the pixels already there.
+  // So it is FREE and never drawn. What it buys is the cull below: with the
+  // middle plugged, the blocks deep on the far side are hidden and need not be
+  // drawn at all.
+  //
+  // CULL_DEPTH is 2, not 0, and that is the whole subtlety. "Only draw blocks
+  // ON a camera-facing face" is the obvious rule and it is WRONG: the cube's
+  // silhouette is a staircase, so at any yaw off the axis a block a layer or
+  // two further back peeks out sideways past the block in front of it, against
+  // the background where no inner cube can help. preview_cube.py measured it —
+  // depth 0 leaks slivers at 72 of 264 orientations, depth 1 at 16, depth 2 at
+  // none — and the check below is the honest render compared pixel-for-pixel,
+  // so if this is ever set too shallow the suite says so instead of shipping a
+  // cube with holes in it.
+  const int CULL_DEPTH = 2;
+  uint8_t cullAxis[CUBE_FACES], cullEnd[CUBE_FACES], nCull = 0;
+  for (uint8_t f = 0; f < CUBE_FACES; f++) {
+    if (!_fp[f].vis) continue;
+    cullAxis[nCull] = _fp[f].aN;
+    cullEnd[nCull]  = (_fp[f].sN > 0) ? (uint8_t)(n - 1) : (uint8_t)0;
+    nCull++;
+  }
+
   // One mip per face; every block face on a face is the same size on screen.
   uint8_t lvl[CUBE_FACES];
   int     ts[CUBE_FACES];
   for (uint8_t f = 0; f < CUBE_FACES; f++) {
     if (!_fp[f].vis) continue;
+    buildShadeLut(f, _fp[f].shade);
     const float side = sqrtf(_fp[f].ux * _fp[f].ux + _fp[f].uy * _fp[f].uy) * s;
     lvl[f] = Skin::levelFor((int)(side + 0.5f));
     ts[f]  = Skin::levelSize(lvl[f]);
@@ -533,6 +526,17 @@ void CubeView::paintBlocks() {
         const int ci = _cube->at(x, y, z);
         if (ci < 0) continue;                  // interior: not a block
         const uint16_t c = (uint16_t)ci;
+
+        // Too deep behind every camera-facing face -> hidden by the inner cube.
+        {
+          const int co3[3] = { x, y, z };
+          bool near = false;
+          for (uint8_t k = 0; k < nCull && !near; k++) {
+            const int d = co3[cullAxis[k]] - (int)cullEnd[k];
+            if (d <= CULL_DEPTH && d >= -CULL_DEPTH) near = true;
+          }
+          if (!near) continue;
+        }
 
         uint8_t key;
         switch (_cube->stateOf(c)) {
@@ -563,7 +567,6 @@ void CubeView::paintBlocks() {
           const float ox = p.ox + ((float)i + g) * p.ux + ((float)j + g) * p.vx + t * p.snx;
           const float oy = p.oy + ((float)i + g) * p.uy + ((float)j + g) * p.vy + t * p.sny;
 
-          buildShadeLut(p.shade);
           const uint16_t *tex = _skin->level(key, lvl[f]);
           const uint16_t *blend = ping ? tex : nullptr;
           paintTile(ox, oy, s * p.ux, s * p.uy, s * p.vx, s * p.vy, p,
@@ -599,12 +602,16 @@ void CubeView::outlineCell(uint16_t cell) {
   faceIJ(f, bx8, by8, bz8, i, j);
 
   const FaceProj &p = _fp[f];
-  float x = p.ox + i * p.ux + j * p.vx + p.hx;
-  float y = p.oy + i * p.uy + j * p.vy + p.hy;
+  // Trace the BLOCK's face, not the whole cell: the block is inset by
+  // BLOCK_GAP on every side, so outlining the cell would put the highlight
+  // out in the gap around it.
+  const float g = BLOCK_GAP, sq = 1.0f - 2.0f * g;
+  float x = p.ox + (i + g) * p.ux + (j + g) * p.vx + p.hx;
+  float y = p.oy + (i + g) * p.uy + (j + g) * p.vy + p.hy;
   int ax = (int)x, ay = (int)y;
-  int bx = (int)(x + p.ux), by = (int)(y + p.uy);
-  int cx = (int)(x + p.ux + p.vx), cy = (int)(y + p.uy + p.vy);
-  int dx = (int)(x + p.vx), dy = (int)(y + p.vy);
+  int bx = (int)(x + sq * p.ux), by = (int)(y + sq * p.uy);
+  int cx = (int)(x + sq * p.ux + sq * p.vx), cy = (int)(y + sq * p.uy + sq * p.vy);
+  int dx = (int)(x + sq * p.vx), dy = (int)(y + sq * p.vy);
   _spr->drawLine(ax, ay, bx, by, _hlCol);
   _spr->drawLine(bx, by, cx, cy, _hlCol);
   _spr->drawLine(cx, cy, dx, dy, _hlCol);
@@ -616,8 +623,6 @@ void CubeView::render(uint16_t bg) {
   project();
   _sonarFade = _cube->sonarFade();       // sampled once so a frame is coherent
   _spr->fillSprite(bg);
-  _lutShade = -1;                        // force a LUT rebuild for this frame
-
   // No face ordering to do: blocks are drawn as solids in voxel order, and a
   // convex solid's own camera-facing faces never overlap each other.
   paintBlocks();

@@ -8,7 +8,7 @@ maths gets proven before it is ever flashed. It:
     out of render3d.cpp, so the preview cannot quietly drift from the firmware;
   * mirrors CubeView::project(), chooseOrientation(), paintFace() and pick(),
     including the EXTRUDED blocks — unrevealed cells stand proud, revealed ones
-    sit flush, and the two camera-facing side walls of each block are drawn in
+    sit flush. Every block is drawn as a solid cube, textured on
     the tile's own hue;
   * asserts the properties the renderer depends on;
   * renders a PNG using real .tex skin files, so the skin pipeline and the
@@ -74,7 +74,6 @@ class Projection:
 
         lx, ly, lz = consts["LX"], consts["LY"], consts["LZ"]
         amb, dif = consts["SHADE_AMBIENT"], consts["SHADE_DIFFUSE"]
-        wu, wv = consts["WALL_U_DARK"], consts["WALL_V_DARK"]
         ccx, ccy = w * 0.5, h * 0.5
 
         self.faces = []
@@ -91,8 +90,6 @@ class Projection:
                 d = nx * lx + ny * ly + nz * lz
                 s = min(1.0, amb + dif * (0.5 + 0.5 * d))
                 f["shade"] = s
-                f["shadeWU"] = s * wu
-                f["shadeWV"] = s * wv
                 o3 = (ox * n - half, oy * n - half, oz * n - half)
                 ro = rot(*o3)
                 f["ox"] = ccx + ro[0] * self.cell
@@ -101,8 +98,8 @@ class Projection:
                 rv = rot(vx, vy, vz)
                 f["ux"], f["uy"] = ru[0] * self.cell, -ru[1] * self.cell
                 f["vx"], f["vy"] = rv[0] * self.cell, -rv[1] * self.cell
-                # The face plane sits BLOCK_GAP INSIDE the surface, and the
-                # side walls run back from there. Both inward, hence negative.
+                # The face plane sits BLOCK_GAP INSIDE the nominal surface,
+                # hence the negative offset.
                 snx, sny = rn[0] * self.cell, -rn[1] * self.cell
                 f["hx"], f["hy"] = -snx * self.gap, -sny * self.gap
                 f["snx"], f["sny"] = snx, sny
@@ -115,9 +112,6 @@ class Projection:
                         f["aV"] = a
                     if (nx, ny, nz)[a]:
                         f["aN"], f["sN"] = a, (nx, ny, nz)[a]
-                f["dzu"], f["dzv"] = ru[2], rv[2]
-                f["wallU"] = AX_U if ru[2] > 0 else AX_U_INV
-                f["wallV"] = AX_V if rv[2] > 0 else AX_V_INV
                 det = f["ux"] * f["vy"] - f["uy"] * f["vx"]
                 f["idet"] = 0.0 if abs(det) < 1e-6 else 1.0 / det
                 f["orient"] = self._orient(b)
@@ -415,9 +409,30 @@ def fill_para(px, py, ax, ay, bx, by, w, h, put):
                 put(x, y, u, v)
 
 
-def render(proj, tex, w, h, states, consts, bg=(30, 30, 30)):
-    """Mirror of CubeView::render(): faces farthest first, blocks back to front,
-    two side walls then the textured cap."""
+def parse_cull_depth(path):
+    """CULL_DEPTH is PARSED out of render3d.cpp, never duplicated here — the
+    whole point of the check is to catch it being set too shallow."""
+    m = re.search(r"const int CULL_DEPTH\s*=\s*(\d+)", open(path, encoding="utf-8").read())
+    if not m:
+        sys.exit("could not find CULL_DEPTH in %s" % path)
+    return int(m.group(1))
+
+
+CULL_DEPTH = parse_cull_depth(REND_CPP)
+
+
+def render(proj, tex, w, h, states, consts, bg=(30, 30, 30), honest=False,
+           inner_colour=None):
+    """Mirror of CubeView::render(): every shell block drawn as a solid cube,
+    back to front, in voxel order.
+
+    `honest=False` is what the firmware does: blocks that are not on a
+    camera-facing cube face are skipped, and the inner cube is left implicit
+    because it is the background colour and the frame already starts that way.
+    `honest=True` draws both for real, so the two can be compared.
+    `inner_colour` paints the inner cube in a contrasting colour instead of the
+    background — it makes the invisible geometry visible, which is the only way
+    to actually look at it."""
     img = Image.new("RGB", (w, h), bg)
     px = img.load()
     n = proj.n
@@ -452,43 +467,92 @@ def render(proj, tex, w, h, states, consts, bg=(30, 30, 30)):
     zr = range(0, n) if rz > 0 else range(n - 1, -1, -1)
     vis = proj.visible()
 
-    for z in zr:
-        for y in yr:
-            for x in xr:
-                blk = (x, y, z)
-                if blk not in states:
-                    continue                     # interior: not a block
-                key = states[blk]
-                t_tex = tex.get(key) if tex else None
-                co = (x, y, z)
+    def draw_inner():
+        """The inner cube: a solid spanning [1-g, n-1+g] on every axis, flush
+        with the inward faces of the shell blocks and meeting the inside edges
+        of the edge blocks. Painted in the BACKGROUND colour.
 
-                for fi in vis:
-                    f = proj.faces[fi]
-                    sh = f["shade"]
-                    tx_src, ty_src = f["orient"]
-                    i, j, cc = co[f["aU"]], co[f["aV"]], co[f["aN"]]
-                    tt = (cc + 1 - g - n) if f["sN"] > 0 else -(cc + g)
-                    ox = f["ox"] + (i + g) * f["ux"] + (j + g) * f["vx"] + tt * f["snx"]
-                    oy = f["oy"] + (i + g) * f["uy"] + (j + g) * f["vy"] + tt * f["sny"]
+        The firmware never draws this — its frame starts as fillSprite(bg), so
+        these pixels are already correct and it is free. Here it IS painted, so
+        the honest render can be compared against the culled one."""
+        span = n - 2 + 2 * g
+        tt = g - 1.0            # same offset either way; see the note below
+        for fi in vis:
+            f = proj.faces[fi]
+            ox = f["ox"] + (1 - g) * f["ux"] + (1 - g) * f["vx"] + tt * f["snx"]
+            oy = f["oy"] + (1 - g) * f["uy"] + (1 - g) * f["vy"] + tt * f["sny"]
 
-                    def put(px_, py_, u, v, t=t_tex, sh=sh, tx=tx_src, ty=ty_src):
-                        stats["written"] += 1
-                        if t is None:
-                            px[px_, py_] = warm((150, 150, 150), sh, pg, pb)
-                            return
-                        src = {AX_U: u, AX_U_INV: 1.0 - u, AX_V: v, AX_V_INV: 1.0 - v}
-                        tu = min(TEX_SIZE - 1, int(src[tx] * TEX_SIZE))
-                        tv = min(TEX_SIZE - 1, int(src[ty] * TEX_SIZE))
-                        px[px_, py_] = warm(t[tu, tv], sh, pg, pb)
+            def put(px_, py_, u, v):
+                stats["written"] += 1
+                px[px_, py_] = inner_colour if inner_colour else bg
 
-                    fill_para(ox, oy, s * f["ux"], s * f["uy"],
-                              s * f["vx"], s * f["vy"], w, h, put)
+            fill_para(ox, oy, span * f["ux"], span * f["uy"],
+                      span * f["vx"], span * f["vy"], w, h, put)
+
+    CULL_DEPTH = globals()["CULL_DEPTH"]
+
+    def on_visible_face(blk):
+        """Is this block within CULL_DEPTH layers of a camera-facing cube face?
+
+        CULL_DEPTH 0 means "on that face". Deeper layers matter because of the
+        STEPPED SILHOUETTE: at a yaw that is not axis-aligned, a block one layer
+        further back peeks out sideways past the block in front of it, and no
+        amount of inner cube hides that — it happens outside the cube's own
+        outline, against the background."""
+        for fi in vis:
+            f = proj.faces[fi]
+            end = (n - 1) if f["sN"] > 0 else 0
+            if abs(blk[f["aN"]] - end) <= CULL_DEPTH:
+                return True
+        return False
+
+    # honest = draw the hidden blocks, then the opaque inner cube over them,
+    # then the visible ones. culled = skip the hidden blocks and the inner cube
+    # entirely, which is what the firmware does.
+    passes = [False, True] if honest else [True]
+    for want_vis in passes:
+        if honest and want_vis:
+            draw_inner()
+        for z in zr:
+            for y in yr:
+                for x in xr:
+                    blk = (x, y, z)
+                    if blk not in states:
+                        continue                 # interior: not a block
+                    if on_visible_face(blk) != want_vis:
+                        continue
+                    key = states[blk]
+                    t_tex = tex.get(key) if tex else None
+                    co = (x, y, z)
+
+                    for fi in vis:
+                        f = proj.faces[fi]
+                        sh = f["shade"]
+                        tx_src, ty_src = f["orient"]
+                        i, j, cc = co[f["aU"]], co[f["aV"]], co[f["aN"]]
+                        tt = (cc + 1 - g - n) if f["sN"] > 0 else -(cc + g)
+                        ox = f["ox"] + (i + g) * f["ux"] + (j + g) * f["vx"] + tt * f["snx"]
+                        oy = f["oy"] + (i + g) * f["uy"] + (j + g) * f["vy"] + tt * f["sny"]
+
+                        def put(px_, py_, u, v, t=t_tex, sh=sh, tx=tx_src, ty=ty_src):
+                            stats["written"] += 1
+                            if t is None:
+                                px[px_, py_] = warm((150, 150, 150), sh, pg, pb)
+                                return
+                            src = {AX_U: u, AX_U_INV: 1.0 - u, AX_V: v, AX_V_INV: 1.0 - v}
+                            tu = min(TEX_SIZE - 1, int(src[tx] * TEX_SIZE))
+                            tv = min(TEX_SIZE - 1, int(src[ty] * TEX_SIZE))
+                            px[px_, py_] = warm(t[tu, tv], sh, pg, pb)
+
+                        fill_para(ox, oy, s * f["ux"], s * f["uy"],
+                                  s * f["vx"], s * f["vy"], w, h, put)
 
     # Report the overdraw, since it is the one real cost of drawing solids.
     covered = sum(1 for yy in range(h) for xx in range(w) if px[xx, yy] != bg)
     if covered:
-        print("  fill: %d pixels written for %d covered (%.2fx overdraw)"
-              % (stats["written"], covered, stats["written"] / covered))
+        print("  fill: %d pixels written for %d covered (%.2fx overdraw)%s"
+              % (stats["written"], covered, stats["written"] / covered,
+                 " [honest: no cull]" if honest else ""))
     return img
 
 
@@ -640,31 +704,54 @@ def run_checks(bases, consts, n=6, w=320, h=380):
                 checked += 1
     print("  edge blocks meet flush across every fold (%d points checked)  OK" % checked)
 
-    # A side wall at the cube's edge would land IN the neighbouring face's own
-    # plane, so it must not be drawn there. Demonstrated rather than asserted
-    # of the code: take a point on where that wall would be and show it lies on
-    # the neighbour's block-face plane. With no z-buffer, drawing it means one
-    # face's extrusion bleeds through the other's tiles.
-    collisions = 0
-    for fa in range(6):
-        ba = bases[fa]
-        ua, va = ba[3:6], ba[6:9]
-        for axis, sign in ((ua, +1), (ua, -1), (va, +1), (va, -1)):
-            want = tuple(sign * c for c in axis)
-            fb = next(k for k in range(6) if tuple(bases[k][9:12]) == want)
-            along_u = (axis == ua)
-            edge = (n - g) if sign > 0 else g
-            # A point partway down that wall, i.e. behind face A's plane.
-            depth = -g - 0.5 * consts["LIP_DEPTH"]
-            p = top_point(ba, edge if along_u else n / 2.0,
-                          n / 2.0 if along_u else edge, n, depth)
-            got = solve_on_top(p, bases[fb], n, hh)
-            assert got is not None, (
-                "face %d's boundary wall is NOT in face %d's plane — the "
-                "reason for skipping it no longer holds" % (fa, fb))
-            collisions += 1
-    print("  boundary side walls would land in the neighbour's plane (%d folds) "
-          "-> correctly skipped  OK" % collisions)
+    # There is no z-buffer, so the ONLY thing keeping a far block from painting
+    # over a near one is the order the voxel loops walk in. Assert that order is
+    # sound rather than trusting it.
+    #
+    # For equal, axis-aligned, grid-aligned cubes under an orthographic camera,
+    # block A can occlude block B only if A is on the camera side of B along
+    # every axis at once — i.e. sign(rx)*(Ax-Bx) >= 0 and likewise for y and z,
+    # with at least one strict. So a correct back-to-front order is exactly a
+    # linear extension of that partial order, which is what the nested loops
+    # (each stepping away-from-camera-first) produce. Checked here directly.
+    shell = [(x, y, z)
+             for z in range(n) for y in range(n) for x in range(n)
+             if x in (0, n - 1) or y in (0, n - 1) or z in (0, n - 1)]
+    orders = 0
+    for yaw_d, pitch_d in ((40, 32), (0, 0), (137, -61), (215, 74), (300, -18)):
+        pr = Projection(bases, consts, n, w, h,
+                        math.radians(yaw_d), math.radians(pitch_d), 1.0)
+        rx, ry, rz = pr.rot_bottom_row()
+        sx = 1 if rx > 0 else -1
+        sy = 1 if ry > 0 else -1
+        sz = 1 if rz > 0 else -1
+        xr = range(0, n) if rx > 0 else range(n - 1, -1, -1)
+        yr = range(0, n) if ry > 0 else range(n - 1, -1, -1)
+        zr = range(0, n) if rz > 0 else range(n - 1, -1, -1)
+        idx = {}
+        k = 0
+        for z in zr:
+            for y in yr:
+                for x in xr:
+                    if x in (0, n - 1) or y in (0, n - 1) or z in (0, n - 1):
+                        idx[(x, y, z)] = k
+                        k += 1
+        assert k == len(shell), "voxel walk visited %d shell blocks, expected %d" % (
+            k, len(shell))
+        for A in shell:
+            for B in shell:
+                if A is B:
+                    continue
+                dx, dy, dz = (A[0] - B[0]) * sx, (A[1] - B[1]) * sy, (A[2] - B[2]) * sz
+                if dx >= 0 and dy >= 0 and dz >= 0 and (dx or dy or dz):
+                    # A can occlude B, so A must be painted AFTER B.
+                    assert idx[A] > idx[B], (
+                        "yaw=%d pitch=%d: block %r can occlude %r but is drawn "
+                        "first — the voxel loop directions are wrong"
+                        % (yaw_d, pitch_d, A, B))
+        orders += 1
+    print("  voxel draw order is back-to-front for every shell block "
+          "(%d orientations, %d blocks)  OK" % (orders, len(shell)))
 
     # ...and every block face is the SAME square.
     sizes = {(round(1 - 2 * g, 9), round(1 - 2 * g, 9))}
@@ -672,6 +759,32 @@ def run_checks(bases, consts, n=6, w=320, h=380):
     side = (1 - 2 * g)
     print("  every block face identical and square (%.3f x %.3f cells)  OK"
           % (side, side))
+
+    # THE INNER-CUBE CULL, proven rather than argued.
+    #
+    # The firmware skips every block that is not on a camera-facing cube face,
+    # on the claim that the inner cube (plus the three visible outer layers)
+    # hides them all. If that claim is ever wrong the cube develops holes you
+    # can see through, so it is checked the only way worth checking: render the
+    # honest version — every block, with an opaque inner cube painted in its
+    # correct place in the painter order — and demand the culled render be
+    # pixel-identical.
+    st = demo_states(n)
+    angles = [(y_, p_) for y_ in range(0, 360, 15) for p_ in range(-75, 76, 15)]
+    for yaw_d, pitch_d in angles:
+        pr = Projection(bases, consts, n, w, h,
+                        math.radians(yaw_d), math.radians(pitch_d), 1.0)
+        a = render(pr, None, w, h, st, consts, honest=True)
+        b = render(pr, None, w, h, st, consts, honest=False)
+        diff = [(x, y) for y in range(h) for x in range(w)
+                if a.getpixel((x, y)) != b.getpixel((x, y))]
+        assert not diff, (
+            "yaw=%d pitch=%d: culling the hidden blocks changed %d pixels "
+            "(first at %r) — the inner cube does NOT cover them"
+            % (yaw_d, pitch_d, len(diff), diff[0]))
+    print("  inner cube hides every culled block at CULL_DEPTH=%d: culled render "
+          "is pixel-identical to the honest one (%d orientations)  OK"
+          % (CULL_DEPTH, len(angles)))
 
     # A face's shade must not move when the cube is turned. The light is fixed
     # in CUBE space precisely so the colours do not drift under your finger; if
@@ -827,7 +940,7 @@ def main():
 
     bases = parse_bases(CUBE_CPP)
     consts = parse_floats(REND_CPP, ["LX", "LY", "LZ", "SHADE_AMBIENT",
-                                     "SHADE_DIFFUSE", "WALL_U_DARK", "WALL_V_DARK",
+                                     "SHADE_DIFFUSE",
                                      "SHADE_POW_G", "SHADE_POW_B"])
     consts.update(parse_floats(REND_H, ["BLOCK_GAP"]))
     print("parsed cube.cpp + render3d: %s" % consts)

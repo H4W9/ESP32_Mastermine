@@ -97,12 +97,9 @@ double-writes.
 This is what makes the cube read as a solid object and gives its edges and
 corners their stepped, chunky silhouette — see `example/`.
 
-* **Every** block stands proud by the same `TILE_RAISE`, revealed or not. There
-  is no differential raising — the cube is a uniform grid of blocks, which is
-  how the reference draws it.
-* **Each block is a cube of side `1 − 2·BLOCK_GAP`, centred in its cell.** That
-  one statement settles the whole geometry, and there is no boundary special
-  case anywhere in `paintFace`:
+* **Each block is a cube of side `1 − 2·BLOCK_GAP`, centred in its cell, and is
+  drawn as one solid** — all three of its camera-facing faces textured, in one
+  pass, with no special case anywhere:
 
   * every visible face is `(1−2g)` square — the *same* square on every block,
     because they are all the same cube;
@@ -125,34 +122,43 @@ corners their stepped, chunky silhouette — see `example/`.
   neighbour's outermost block edge, and every face is the same square.
 * A cleared block with no adjacent mines uses a near-black face, which is what
   turns swept regions dark the way the reference does.
-* Each block shows its two camera-facing sides as a **thin lip** (`LIP_DEPTH`),
-  painted in **the tile's own hue darkened** — a teal block has teal sides, a
-  gold one gold sides. You see the cube's real sides down a groove, not a
-  shadow.
 
-* Nothing is drawn on a side where a block reaches the cube's edge. That side
-  is not a side at all — it is the block's *other exposed face*, which the
-  neighbouring cube face draws, textured and numbered. A quad there lands
-  exactly in that face's own plane (the block's +X side sits at `x = n−g`,
-  which is where the +X face draws), and without a z-buffer whichever is
-  painted second wins.
+### One solid per block — no side-wall quads, no face ordering
 
-### Two passes, so sides cannot bleed through tiles
+`paintBlocks()` walks the voxel grid once and draws each shell block's three
+camera-facing faces, all textured with that block's own tile.
 
-`render()` draws **every** block's sides first, then **every** block's face.
+This replaced an earlier design where a block was a textured cap plus two
+flat-shaded side "lips". That design needed a growing pile of rules to stay
+correct — skip the lip where a block reaches the cube's edge (it lands exactly
+in the neighbouring face's plane, and with no z-buffer whichever paints second
+wins); draw all lips before all caps so a nearer face's lips could not land on
+a farther face's caps; sort the three visible faces farthest-first. Every one
+of those rules existed to paper over the fact that a block is a solid and was
+not being drawn as one. Drawing the solid deletes all of them, and the slivers
+of a block visible in the gap between its neighbours are now its real textured
+faces rather than a flat approximation of them.
 
-A side is recessed behind its own face, so it can never legally cover any
-block's face — but drawing each cube face completely before moving to the next
-does not respect that: a nearer face's sides get painted after a farther face's
-tiles and land on top of them. That was the bleeding, and thinning the lip only
-made it smaller rather than removing it. Splitting the passes makes the ordering
-correct by construction.
+**Ordering.** Still no z-buffer. For equal, grid-aligned cubes under an
+orthographic camera, block A can occlude B only if A is on the camera side of B
+along *every* axis at once. So a correct back-to-front order is any linear
+extension of that partial order, and nesting the three loops with each axis
+stepping away-from-camera-first (`_rot[6..8]` signs) produces one.
+`preview_cube.py --check` asserts this directly: over several orientations, for
+every ordered pair of shell blocks where A could occlude B, A is drawn later.
+A convex solid's own camera-facing faces never overlap each other, so there is
+nothing to sort within a block either.
 
-No z-buffer is needed even so. Within a face, depth is linear in (i,j), so
-back-to-front is just a choice of loop direction on each axis. Across faces,
-raised blocks near a shared edge *can* reach into a neighbour's territory, so
-the three visible faces are drawn farthest-first — ordering by the depth of the
-face centre, which is exactly ordering by the normal's view-space z.
+**The cost, measured.** Faces in the interior of a cube face are covered by the
+block in front of them, so the overdraw is real: `preview_cube.py` instruments
+the rasteriser and reports **3.08× pixels written per pixel covered** at n=6.
+(The cap-plus-lips version was never instrumented, so there is no measured
+figure to compare against — but it drew strictly fewer and smaller quads, so
+this is certainly the more expensive of the two.) The simpler model is the
+costlier one here, and it is worth watching on hardware — if the frame rate suffers, the `setFast()` half-resolution
+drag pass is the lever, and a cheap culling rule (skip a face whose outward
+neighbour cell is also a shell block) would recover most of it without
+reintroducing any of the deleted special cases.
 
 ### Texture orientation is fixed to the face
 
