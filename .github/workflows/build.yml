@@ -30,11 +30,13 @@ jobs:
             max_size:  3604480    # ota_0 slot size (0x370000, from partitions.csv)
 
           # V8 (ESP32-C5, 8 MB flash, PSRAM) - ILI9341 240x320, XPT2046
-          - board:     MARAUDER_V8
-            short:     v8
-            fqbn:      "esp32:esp32:esp32c5:CDCOnBoot=default,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=8M,PSRAM=enabled,PartitionScheme=custom,UploadSpeed=921600"
-            tft_setup: User_Setup_marauder_v8
-            max_size:  3604480    # ota_0 slot size (0x370000, from partitions.csv)
+          # Disabled for now; re-enable by uncommenting. The release job merges
+          # whatever artifacts exist, so it keeps working with one board.
+          # - board:     MARAUDER_V8
+          #   short:     v8
+          #   fqbn:      "esp32:esp32:esp32c5:CDCOnBoot=default,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=8M,PSRAM=enabled,PartitionScheme=custom,UploadSpeed=921600"
+          #   tft_setup: User_Setup_marauder_v8
+          #   max_size:  3604480    # ota_0 slot size (0x370000, from partitions.csv)
 
     steps:
       - name: Checkout repository
@@ -66,13 +68,18 @@ jobs:
           arduino-cli config add board_manager.additional_urls \
             https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 
-      # Only ArduinoJson is external. HTTPClient / WiFiClientSecure / SD / SPIFFS
-      # / Wire come with the ESP32 core, and picojpeg is vendored in src/, which
-      # arduino-cli compiles automatically.
+      # ArduinoHttpClient is NOT optional, however unused it looks from the
+      # sketch root: arduino-cli compiles everything under src/, and
+      # src/Picoware/internal/system/http.cpp includes it UNGUARDED. (Its
+      # AsyncHTTPRequest_RP2040W and PicoDVI includes sit behind RP2040
+      # guards, so those really do compile out — this one does not.)
+      # HTTPClient / WiFiClientSecure / SD / SPIFFS / Wire come with the ESP32
+      # core, and picojpeg is vendored in src/.
       - name: Install libraries
         run: |
           arduino-cli lib update-index
           arduino-cli lib install "ArduinoJson"
+          arduino-cli lib install "ArduinoHttpClient"
 
       # Patched TFT_eSPI for the ESP32-C5 (same fork the Marauder build uses).
       - name: Install TFT_eSPI (ESP32-C5 fork)
