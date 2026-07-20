@@ -1,0 +1,32 @@
+# Working notes, not part of the firmware.
+PLAN.md
+
+# Arduino IDE "Export Compiled Binary" output.
+build/
+*.bin
+*.elf
+*.map
+*.hex
+
+# Skin assets from the Mastermine store are third-party, user-created works.
+# They are downloaded on-device or onto an SD card; none of them belong in the
+# repo. fetch_skins.py defaults to --out "." so running it from sd_prep/ drops
+# them right here, which is exactly what this rule is for.
+mastermine/
+*.tex
+
+# Preview and check output.
+cube.png
+sd_prep/*.png
+
+# Python.
+__pycache__/
+*.py[cod]
+
+# Editor and OS.
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
