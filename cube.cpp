@@ -270,7 +270,13 @@ void Cube::revealFlood(uint16_t c) {
   _stack[sp++] = c;
   while (sp) {
     uint16_t k = _stack[--sp];
-    if (stateOf(k) != CS_HIDDEN) continue;
+    // Only CS_REVEALED and CS_FLAGGED are actually protected from reveal (see
+    // reveal()'s own gate above). A cell that was flagged and then unflagged
+    // sits in CS_QUESTION, not CS_HIDDEN — checking for CS_HIDDEN here meant
+    // the very first cell of a reveal (and any zero-cascade neighbour) could
+    // silently fail to open if it happened to be question-marked.
+    CellState sk = stateOf(k);
+    if (sk == CS_REVEALED || sk == CS_FLAGGED) continue;
     setState(k, CS_REVEALED);
     _revealed++;
     creditReveal();
@@ -278,7 +284,8 @@ void Cube::revealFlood(uint16_t c) {
     const uint16_t *nb = neighbours(k);
     for (uint8_t m = 0; m < _nbn[k]; m++) {
       uint16_t o = nb[m];
-      if (stateOf(o) == CS_HIDDEN && sp < _cells) _stack[sp++] = o;
+      CellState so = stateOf(o);
+      if (so != CS_REVEALED && so != CS_FLAGGED && sp < _cells) _stack[sp++] = o;
     }
   }
 }
@@ -376,7 +383,13 @@ bool Cube::chord(uint16_t c) {
   bool acted = false;
   for (uint8_t k = 0; k < _nbn[c]; k++) {
     uint16_t o = nb[k];
-    if (stateOf(o) != CS_HIDDEN) continue;
+    // Match reveal()'s own gate here, not just CS_HIDDEN: a cell that was
+    // flagged and then unflagged sits in CS_QUESTION, not CS_HIDDEN, and is
+    // just as revealable. Checking CS_HIDDEN specifically left question-marked
+    // cells stuck forever, since chording was the only way most boards get
+    // fully opened.
+    CellState so = stateOf(o);
+    if (so == CS_REVEALED || so == CS_FLAGGED) continue;
     acted = true;
     if (!reveal(o)) continue;
     if (_state == GS_LOST) return true;
@@ -406,7 +419,10 @@ void Cube::cascadeZeros() {
         uint16_t o = nb[k];
         // Flags are left alone: a flag on a block next to a zero is simply
         // wrong, and clearing it for the player would hide their mistake.
-        if (stateOf(o) != CS_HIDDEN) continue;
+        // CS_QUESTION is not a protected state though (see reveal()'s own
+        // gate) — a question-marked cell here should open like any hidden one.
+        CellState so = stateOf(o);
+        if (so == CS_REVEALED || so == CS_FLAGGED) continue;
         if (isMine(o)) continue;            // impossible when adj is 0; be safe
         setState(o, CS_REVEALED);
         _revealed++;
