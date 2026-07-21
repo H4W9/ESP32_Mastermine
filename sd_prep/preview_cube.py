@@ -426,10 +426,9 @@ def render(proj, tex, w, h, states, consts, bg=(30, 30, 30), honest=False,
     """Mirror of CubeView::render(): every shell block drawn as a solid cube,
     back to front, in voxel order.
 
-    `honest=False` is what the firmware does: blocks that are not on a
-    camera-facing cube face are skipped, and the inner cube is left implicit
-    because it is the background colour and the frame already starts that way.
-    `honest=True` draws both for real, so the two can be compared.
+    `honest=False` is what the firmware does: blocks too far behind every
+    camera-facing face are skipped, on the grounds that the inner cube hides
+    them. `honest=True` skips nothing, so the two can be compared.
     `inner_colour` paints the inner cube in a contrasting colour instead of the
     background — it makes the invisible geometry visible, which is the only way
     to actually look at it."""
@@ -472,9 +471,10 @@ def render(proj, tex, w, h, states, consts, bg=(30, 30, 30), honest=False,
         with the inward faces of the shell blocks and meeting the inside edges
         of the edge blocks. Painted in the BACKGROUND colour.
 
-        The firmware never draws this — its frame starts as fillSprite(bg), so
-        these pixels are already correct and it is free. Here it IS painted, so
-        the honest render can be compared against the culled one."""
+        The firmware DOES paint this, between its two block passes. Believing
+        it was free because the frame starts as fillSprite(bg) is what left the
+        cube see-through: blocks are drawn in between, so the gaps show the far
+        side of the cube until this quad erases it."""
         span = n - 2 + 2 * g
         tt = g - 1.0            # same offset either way; see the note below
         for fi in vis:
@@ -492,13 +492,23 @@ def render(proj, tex, w, h, states, consts, bg=(30, 30, 30), honest=False,
     CULL_DEPTH = globals()["CULL_DEPTH"]
 
     def on_visible_face(blk):
-        """Is this block within CULL_DEPTH layers of a camera-facing cube face?
+        """Is this block ON a camera-facing cube face? That is the occlusion
+        boundary: such a block sits outside the inner cube on that axis and so
+        covers it, and is drawn in pass 1 (after it)."""
+        for fi in vis:
+            f = proj.faces[fi]
+            end = (n - 1) if f["sN"] > 0 else 0
+            if blk[f["aN"]] == end:
+                return True
+        return False
 
-        CULL_DEPTH 0 means "on that face". Deeper layers matter because of the
-        STEPPED SILHOUETTE: at a yaw that is not axis-aligned, a block one layer
-        further back peeks out sideways past the block in front of it, and no
-        amount of inner cube hides that — it happens outside the cube's own
-        outline, against the background."""
+    def within_cull(blk):
+        """Is this block near enough a camera-facing face to be drawn at all?
+
+        Blocks that are not ON a face still matter because of the STEPPED
+        SILHOUETTE: at a yaw off the axis, a block a layer or two back peeks
+        out SIDEWAYS past the one in front, against the background, where the
+        inner cube cannot help."""
         for fi in vis:
             f = proj.faces[fi]
             end = (n - 1) if f["sN"] > 0 else 0
@@ -506,12 +516,11 @@ def render(proj, tex, w, h, states, consts, bg=(30, 30, 30), honest=False,
                 return True
         return False
 
-    # honest = draw the hidden blocks, then the opaque inner cube over them,
-    # then the visible ones. culled = skip the hidden blocks and the inner cube
-    # entirely, which is what the firmware does.
-    passes = [False, True] if honest else [True]
-    for want_vis in passes:
-        if honest and want_vis:
+    # Mirrors CubeView::paintBlocks(): pass 0 (blocks not on a camera-facing
+    # face), then the inner cube, then pass 1 (blocks on one). `honest` draws
+    # EVERY block rather than applying the cull, so the two can be compared.
+    for want_vis in (False, True):
+        if want_vis:
             draw_inner()
         for z in zr:
             for y in yr:
@@ -520,6 +529,8 @@ def render(proj, tex, w, h, states, consts, bg=(30, 30, 30), honest=False,
                     if blk not in states:
                         continue                 # interior: not a block
                     if on_visible_face(blk) != want_vis:
+                        continue
+                    if not honest and not within_cull(blk):
                         continue
                     key = states[blk]
                     t_tex = tex.get(key) if tex else None

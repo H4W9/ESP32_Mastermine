@@ -47,11 +47,16 @@ extern const FaceBasis CUBE_BASIS[CUBE_FACES];
 static const uint8_t CUBE_N_MAX = 20;
 static const uint8_t CUBE_N_MIN = 4;
 
+// There is deliberately NO question-mark state. It used to sit between flagged
+// and hidden in the cycleFlag rotation, and it was a trap: reveal() let a
+// questioned block through its guard, but revealFlood() only ever expands
+// CS_HIDDEN, so revealing one returned true and did nothing. A block you had
+// flagged and then unflagged became permanently untappable — only a powerup
+// could open it. Two states of "not opened yet" earned nothing and cost that.
 enum CellState : uint8_t {
   CS_HIDDEN   = 0,
   CS_REVEALED = 1,
   CS_FLAGGED  = 2,
-  CS_QUESTION = 3,
 };
 
 enum GameState : uint8_t {
@@ -104,7 +109,12 @@ static const uint32_t SONAR_MS = 1000;
 // 2.5 takes everything two rings out along a row or a diagonal-and-one, but
 // leaves the far corners of a 5x5 (2.83 away) outside — so the hole is round
 // rather than square, and it wraps a cube edge without any special case.
-static const float BURST_RADIUS = 2.5f;
+// Burst reaches THREE rings over the neighbour graph, rounded off by this
+// radius in 3D. 3.5 keeps the same shape one ring larger: it admits a straight
+// 3-step run (3.0) and the 3,1 and 3,2 diagonals, while the square's far corner
+// at 4.24 still drops out. check_powerups.py asserts the resulting counts.
+static const float BURST_RADIUS = 3.5f;
+static const uint8_t BURST_RINGS = 3;
 
 class Cube {
 public:
@@ -161,7 +171,11 @@ public:
   uint8_t held(Powerup p) const { return _held[p]; }
   bool    needsTarget(Powerup p) const { return p != PU_LIFESAVER; }
   bool    lifeArmed() const { return _lifeArmed; }
-  bool    usePowerup(Powerup p, uint16_t target, uint8_t &out);
+  // `face` is which cube face the target was tapped on (CUBE_FACES if not
+  // known). Lightning runs along that face's two in-plane axes; everything
+  // else ignores it.
+  bool    usePowerup(Powerup p, uint16_t target, uint8_t &out,
+                     uint8_t face = CUBE_FACES);
   // True when the last reveal() was saved by an armed Lifesaver; cleared on read.
   bool    takeLifesaverUsed() { bool v = _lifeUsed; _lifeUsed = false; return v; }
 

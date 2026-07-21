@@ -339,6 +339,56 @@ void CubeView::buildShadeLut(uint8_t f, float shade) {
     if (xR > _vw - 1) xR = _vw - 1;                                            \
     if (xL > xR) continue;
 
+// Native RGB565 -> the byte order a TFT_eSprite buffer holds.
+static inline uint16_t sprSwap(uint16_t c) {
+  return (uint16_t)((c >> 8) | (c << 8));
+}
+
+// Flat-shaded parallelogram. Only the inner cube uses this.
+void CubeView::fillPara(float px, float py, float ax, float ay,
+                        float bx, float by, uint16_t colour) {
+  R3D_SPAN_SETUP()
+  // One swap for the whole quad — the buffer is byte-reversed, see buildShadeLut.
+  colour = sprSwap(colour);
+  const int step = _fast ? 2 : 1;
+  for (int y = yTop; y <= yBot; y += step) {
+    R3D_SPAN_ROW(y)
+    uint16_t *dst = _buf + (size_t)y * _vw + xL;
+    for (int x = xL; x <= xR; x++) *dst++ = colour;
+    if (step == 2 && y + 1 <= yBot)
+      memcpy(_buf + (size_t)(y + 1) * _vw + xL,
+             _buf + (size_t)y * _vw + xL,
+             (size_t)(xR - xL + 1) * sizeof(uint16_t));
+  }
+}
+
+// THE INNER CUBE: a solid filling the hollow centre, spanning [1-g, n-1+g] on
+// every axis — flush with the inward faces of the shell blocks, its edges
+// meeting the inside edges of the edge blocks.
+//
+// It is painted in the BACKGROUND colour, and it is NOT free, however much it
+// looks it. The frame does start as fillSprite(bg), but blocks are painted
+// between then and now, so what shows through the gaps between the front
+// blocks is the far side of the cube. This quad is what erases it. Skipping it
+// on the "those pixels are already bg" argument is exactly the mistake that
+// left the cube see-through.
+void CubeView::paintInner(uint16_t bg) {
+  const int n = _cube->n();
+  const float g = BLOCK_GAP;
+  const float span = (float)n - 2.0f + 2.0f * g;
+  if (span <= 0.0f) return;                  // n < 2: no interior to fill
+  // Distance from the nominal outer surface in to the inner cube's face. It
+  // works out the same on both the +N and -N sides.
+  const float t = g - 1.0f;
+  for (uint8_t f = 0; f < CUBE_FACES; f++) {
+    const FaceProj &p = _fp[f];
+    if (!p.vis) continue;
+    const float ox = p.ox + (1.0f - g) * p.ux + (1.0f - g) * p.vx + t * p.snx;
+    const float oy = p.oy + (1.0f - g) * p.uy + (1.0f - g) * p.vy + t * p.sny;
+    fillPara(ox, oy, span * p.ux, span * p.uy, span * p.vx, span * p.vy, bg);
+  }
+}
+
 // One face of a block, with the skin texture mapped affinely across it.
 void CubeView::paintTile(float px, float py, float ax, float ay, float bx, float by,
                          const FaceProj &fp, const uint16_t *tex, int ts,
@@ -478,28 +528,25 @@ void CubeView::paintBlocks() {
   const int fromY = (stepY > 0) ? 0 : n - 1, toY = (stepY > 0) ? n : -1;
   const int fromZ = (stepZ > 0) ? 0 : n - 1, toZ = (stepZ > 0) ? n : -1;
 
-  // THE INNER CUBE, and why it is not drawn.
+  // DRAW ORDER, and where the inner cube sits in it.
   //
-  // A solid cube fills the hollow centre, spanning [1-g, n-1+g] on every axis:
-  // flush with the inward faces of the shell blocks, its edges meeting the
-  // inside edges of the edge blocks. Without it you can see through the gaps
-  // between blocks, across the empty middle, and out at the far side.
+  // Two passes over the voxel walk with paintInner() between them:
   //
-  // It is painted in the background colour — and the frame already began with
-  // fillSprite(bg), so drawing it would write exactly the pixels already there.
-  // So it is FREE and never drawn. What it buys is the cull below: with the
-  // middle plugged, the blocks deep on the far side are hidden and need not be
-  // drawn at all.
+  //   pass 0  blocks NOT on a camera-facing face
+  //   ----->  the inner cube
+  //   pass 1  blocks ON a camera-facing face
   //
-  // CULL_DEPTH is 2, not 0, and that is the whole subtlety. "Only draw blocks
-  // ON a camera-facing face" is the obvious rule and it is WRONG: the cube's
-  // silhouette is a staircase, so at any yaw off the axis a block a layer or
-  // two further back peeks out sideways past the block in front of it, against
-  // the background where no inner cube can help. preview_cube.py measured it —
-  // depth 0 leaks slivers at 72 of 264 orientations, depth 1 at 16, depth 2 at
-  // none — and the check below is the honest render compared pixel-for-pixel,
-  // so if this is ever set too shallow the suite says so instead of shipping a
-  // cube with holes in it.
+  // That split is exactly the occlusion boundary. A pass-0 block has the inner
+  // cube on its camera side along every axis, so the cube may cover it; a
+  // pass-1 block sits outside the inner cube on the axis of the face it is on,
+  // so it covers the cube instead. No z-buffer needed, as before.
+  //
+  // Pass 0 is not empty and must not be culled away: at any yaw off the axis
+  // the silhouette is a staircase, and a block a layer or two back peeks out
+  // SIDEWAYS past the one in front, against the background, where the inner
+  // cube cannot help. Those slivers are real and visible. CULL_DEPTH is how
+  // far back that reaches — measured, not guessed: dropping pass 0 entirely
+  // (depth 0) leaks at 72 of 264 orientations, depth 1 at 16, depth 2 at none.
   const int CULL_DEPTH = 2;
   uint8_t cullAxis[CUBE_FACES], cullEnd[CUBE_FACES], nCull = 0;
   for (uint8_t f = 0; f < CUBE_FACES; f++) {
@@ -520,28 +567,30 @@ void CubeView::paintBlocks() {
     ts[f]  = Skin::levelSize(lvl[f]);
   }
 
-  for (int z = fromZ; z != toZ; z += stepZ) {
+  for (uint8_t pass = 0; pass < 2; pass++) {
+   if (pass == 1) paintInner(_bg);
+   for (int z = fromZ; z != toZ; z += stepZ) {
     for (int y = fromY; y != toY; y += stepY) {
       for (int x = fromX; x != toX; x += stepX) {
         const int ci = _cube->at(x, y, z);
         if (ci < 0) continue;                  // interior: not a block
         const uint16_t c = (uint16_t)ci;
 
-        // Too deep behind every camera-facing face -> hidden by the inner cube.
         {
           const int co3[3] = { x, y, z };
-          bool near = false;
-          for (uint8_t k = 0; k < nCull && !near; k++) {
+          bool onFace = false, near = false;
+          for (uint8_t k = 0; k < nCull; k++) {
             const int d = co3[cullAxis[k]] - (int)cullEnd[k];
+            if (d == 0) { onFace = true; near = true; break; }
             if (d <= CULL_DEPTH && d >= -CULL_DEPTH) near = true;
           }
-          if (!near) continue;
+          if (!near) continue;                 // hidden: the inner cube covers it
+          if (onFace != (pass == 1)) continue; // belongs to the other pass
         }
 
         uint8_t key;
         switch (_cube->stateOf(c)) {
           case CS_FLAGGED:  key = TK_FLAGGED; break;
-          case CS_QUESTION: key = TK_UNREVEALED; break;
           case CS_REVEALED: key = _cube->isMine(c) ? (uint8_t)TK_MINE
                                                    : Skin::keyForRevealed(_cube->adj(c)); break;
           default:          key = TK_UNREVEALED; break;
@@ -575,6 +624,7 @@ void CubeView::paintBlocks() {
         }
       }
     }
+   }
   }
 }
 
@@ -622,6 +672,7 @@ void CubeView::render(uint16_t bg) {
   if (!_spr || !_cube || !_cube->ready() || !_skin || !_skin->loaded()) return;
   project();
   _sonarFade = _cube->sonarFade();       // sampled once so a frame is coherent
+  _bg = bg;                              // paintInner() fills with it
   _spr->fillSprite(bg);
   // No face ordering to do: blocks are drawn as solids in voxel order, and a
   // convex solid's own camera-facing faces never overlap each other.
@@ -631,7 +682,8 @@ void CubeView::render(uint16_t bg) {
   _spr->pushSprite(_vx, _vy);
 }
 
-int CubeView::pick(int panelX, int panelY) const {
+int CubeView::pick(int panelX, int panelY, uint8_t *faceOut) const {
+  if (faceOut) *faceOut = CUBE_FACES;          // "no face", until one wins
   if (!_cube || !_cube->ready()) return -1;
   const float x = (float)(panelX - _vx), y = (float)(panelY - _vy);
   if (x < 0 || y < 0 || x >= _vw || y >= _vh) return -1;
@@ -666,7 +718,11 @@ int CubeView::pick(int panelX, int panelY) const {
     const float ccy = p.oy + (i + 0.5f) * p.uy + (j + 0.5f) * p.vy + p.hy;
     const float ex = x - ccx, ey = y - ccy;
     const float d2 = ex * ex + ey * ey;
-    if (d2 < bestD2) { bestD2 = d2; best = ci; }
+    // Report the face the winning block was hit ON, not just the block. An
+    // edge block belongs to two faces and a corner block to three, and which
+    // one you actually tapped is real information the block index cannot
+    // carry — Lightning needs it to know which two directions to run in.
+    if (d2 < bestD2) { bestD2 = d2; best = ci; if (faceOut) *faceOut = f; }
   }
   return best;
 }

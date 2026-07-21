@@ -88,7 +88,9 @@ public:
 
   // Panel coordinates -> cell index, or -1 if the tap missed the cube. Uses
   // the projection from the last render(), so call it after one.
-  int pick(int panelX, int panelY) const;
+  // `faceOut`, if given, receives WHICH cube face the block was hit on (an
+  // edge block has two, a corner three), or CUBE_FACES on a miss.
+  int pick(int panelX, int panelY, uint8_t *faceOut = nullptr) const;
 
   // Fit the cube to the viewport at zoom 1. Recomputed on attach/resize.
   void refit();
@@ -130,6 +132,13 @@ private:
   void buildShadeLut(uint8_t f, float shade);
   // Draw every shell block as a solid cube, back to front.
   void paintBlocks();
+  // The background-coloured solid filling the hollow centre. Drawn between the
+  // two block passes — see paintBlocks(). Not optional: without it you see the
+  // far side of the cube through the gaps between the near blocks.
+  void paintInner(uint16_t bg);
+  // Flat-shaded parallelogram, for the inner cube.
+  void fillPara(float px, float py, float ax, float ay, float bx, float by,
+                uint16_t colour);
   // Textured parallelogram at (px,py) spanned by (ax,ay) and (bx,by). When
   // `blendTex` is given the two textures are cross-faded by `blendK` (0 = all
   // `tex`, 255 = all `blendTex`), which is how a sonar ping fades away.
@@ -156,6 +165,7 @@ private:
   int   _hl = -1;
   uint16_t _hlCol = 0xFFFF;
   float _sonarFade = 0.0f;         // sampled once per frame
+  uint16_t _bg = 0;                // this frame's background, for the inner cube
 
   FaceProj _fp[CUBE_FACES];
   // Shading tables, one set per face. Each entry is that channel's PRE-SHIFTED

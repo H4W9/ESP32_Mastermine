@@ -353,10 +353,11 @@ bool Cube::reveal(uint16_t c) {
 bool Cube::cycleFlag(uint16_t c) {
   if (!ready() || c >= _cells) return false;
   if (_state == GS_WON || _state == GS_LOST) return false;
+  // Straight toggle. Unflagging returns a block to CS_HIDDEN, so it can be
+  // revealed again like any other — see the note on CellState.
   switch (stateOf(c)) {
-    case CS_HIDDEN:   setState(c, CS_FLAGGED);  _flags++; return true;
-    case CS_FLAGGED:  setState(c, CS_QUESTION); _flags--; return true;
-    case CS_QUESTION: setState(c, CS_HIDDEN);             return true;
+    case CS_HIDDEN:   setState(c, CS_FLAGGED); _flags++; return true;
+    case CS_FLAGGED:  setState(c, CS_HIDDEN);  _flags--; return true;
     default: return false;
   }
 }
@@ -432,7 +433,7 @@ void Cube::clearBlock(uint16_t c) {
   if (stateOf(c) != CS_REVEALED) { setState(c, CS_REVEALED); _revealed++; }
 }
 
-bool Cube::usePowerup(Powerup p, uint16_t target, uint8_t &out) {
+bool Cube::usePowerup(Powerup p, uint16_t target, uint8_t &out, uint8_t face) {
   out = 0;
   if (!ready() || p >= PU_COUNT || _held[p] == 0) return false;
   if (_state == GS_WON || _state == GS_LOST) return false;
@@ -441,32 +442,37 @@ bool Cube::usePowerup(Powerup p, uint16_t target, uint8_t &out) {
 
   switch (p) {
     case PU_BURST: {
-      // A round patch two rings across.
+      // A round patch BURST_RINGS across.
       //
-      // Two steps, and both matter. First walk TWO RINGS out over the
-      // neighbour graph, which is what bounds the effect to "two rings" and
-      // wraps a cube edge correctly, because the adjacency already does. Then
-      // keep only what is within BURST_RADIUS in 3D, which rounds the square
-      // off — the far corners of a 5x5 sit at 2.83 and drop out.
+      // Two steps, and both matter. First walk out over the neighbour graph,
+      // which is what bounds the effect to whole rings and wraps a cube edge
+      // correctly, because the adjacency already does. Then keep only what is
+      // within BURST_RADIUS in 3D, which rounds the square off.
       //
-      // Distance alone is not enough: on a small cube a 2.5-radius sphere
-      // reaches blocks around the edge that are nowhere near two rings away
-      // over the surface, and the patch balloons (33 blocks instead of 21 on a
-      // 5-cube). The graph walk is what keeps it honest.
-      uint16_t patch[96];
-      uint8_t np = 0;
+      // Distance alone is not enough: on a small cube the sphere reaches
+      // blocks around the edge that are nowhere near that many rings away over
+      // the surface, and the patch balloons (33 blocks instead of 21 on a
+      // 5-cube, when this was 2 rings). The graph walk is what keeps it honest.
+      // BFS by ring, BURST_RINGS deep. Sized for the worst case: on a small
+      // cube three rings can reach most of the shell, so this is not the
+      // (2r+1)^2 a flat board would suggest.
+      static const uint16_t BURST_MAX = 256;
+      uint16_t patch[BURST_MAX];
+      uint16_t np = 0;
       patch[np++] = target;
-      const uint16_t *nb1 = neighbours(target);
-      for (uint8_t k = 0; k < _nbn[target] && np < 96; k++) patch[np++] = nb1[k];
-      const uint8_t ring1End = np;
-      for (uint8_t a = 1; a < ring1End; a++) {
-        const uint16_t *nb2 = neighbours(patch[a]);
-        for (uint8_t k = 0; k < _nbn[patch[a]] && np < 96; k++) {
-          uint16_t o = nb2[k];
-          bool dup = false;
-          for (uint8_t m = 0; m < np; m++) if (patch[m] == o) { dup = true; break; }
-          if (!dup) patch[np++] = o;
+      uint16_t ringStart = 0, ringEnd = 1;
+      for (uint8_t r = 0; r < BURST_RINGS && np < BURST_MAX; r++) {
+        for (uint16_t a = ringStart; a < ringEnd && np < BURST_MAX; a++) {
+          const uint16_t *nbr = neighbours(patch[a]);
+          for (uint8_t k = 0; k < _nbn[patch[a]] && np < BURST_MAX; k++) {
+            uint16_t o = nbr[k];
+            bool dup = false;
+            for (uint16_t m = 0; m < np; m++) if (patch[m] == o) { dup = true; break; }
+            if (!dup) patch[np++] = o;
+          }
         }
+        ringStart = ringEnd;
+        ringEnd   = np;
       }
 
       uint8_t tx, ty, tz;
@@ -474,7 +480,7 @@ bool Cube::usePowerup(Powerup p, uint16_t target, uint8_t &out) {
       const float cx = tx + 0.5f, cy = ty + 0.5f, cz = tz + 0.5f;
       const float r2 = BURST_RADIUS * BURST_RADIUS;
       uint16_t cnt = 0;
-      for (uint8_t a = 0; a < np; a++) {
+      for (uint16_t a = 0; a < np; a++) {
         uint8_t bx, by, bz;
         posOf(patch[a], bx, by, bz);
         const float dx = bx + 0.5f - cx, dy = by + 0.5f - cy, dz = bz + 0.5f - cz;
@@ -487,37 +493,69 @@ bool Cube::usePowerup(Powerup p, uint16_t target, uint8_t &out) {
       break;
     }
     case PU_LIGHTNING: {
-      // A cross of bolts right around the cube: BOTH the ring through the
-      // target horizontally and the one vertically, which together wrap the
-      // cube twice at right angles.
+      // A cross of bolts right around the cube: BOTH directions across the face
+      // it was applied to, always, wherever on that face you aim it.
       //
-      // A ring is the set of shell blocks sharing one coordinate with the
-      // target. That is 4(n-1) blocks when the coordinate is INTERIOR; at 0 or
-      // n-1 the same set is a whole face, so only interior axes qualify. A
-      // face-centre block has exactly two of those — its face's horizontal and
-      // vertical — which is the pair we want. An edge block has one, a corner
-      // block none.
+      // The two directions are the applied face's own in-plane axes, which is
+      // why `face` has to be passed in — an edge block lies on two faces and a
+      // corner block on three, and "which way is across" is a property of the
+      // face you tapped, not of the block.
+      //
+      // A RING along axis `a` at value `v` is every shell block with
+      // coord_a == v that ALSO has one of its other two coordinates extreme.
+      // That second clause is what makes this work at an edge or corner:
+      //
+      //   * v interior -> the clause is automatic (a shell block needs some
+      //     extreme coordinate), giving the 4(n-1) band round the cube;
+      //   * v extreme  -> without it the set is a whole n^2 FACE, which is why
+      //     this used to refuse to run along an extreme axis and so fired only
+      //     one bolt at an edge and none at a corner. With it, the set is that
+      //     face's PERIMETER — also 4(n-1) blocks, also a genuine ring, and it
+      //     passes through the target exactly as the drawn line would.
+      //
+      // So both directions always yield a real ring of the same size, and no
+      // fallback case is needed.
       uint8_t x, y, z;
       posOf(target, x, y, z);
       const uint8_t co[3] = { x, y, z };
-      int axes[2], na = 0;
-      for (int a = 0; a < 3 && na < 2; a++)
-        if (co[a] != 0 && co[a] != _n - 1) axes[na++] = a;
 
-      if (na == 0) {                          // a corner block: nothing interior
-        clearBlock(target);
-        cascadeZeros();
-        out = 1;
-        break;
+      // The applied face's in-plane axes. Each of U and V has exactly one
+      // non-zero component (guaranteed by CUBE_BASIS, asserted by
+      // check_cube.py), so this is just finding which.
+      // If the caller could not say which face (an unknown or stale value),
+      // fall back to one the block genuinely lies on — CUBE_BASIS[0] would
+      // otherwise give rings that miss the target entirely.
+      uint8_t uf = face;
+      if (uf >= CUBE_FACES || !(faceMask(target) & (1 << uf))) {
+        uf = 0;
+        for (uint8_t k = 0; k < CUBE_FACES; k++)
+          if (faceMask(target) & (1 << k)) { uf = k; break; }
       }
+      const FaceBasis &fb = CUBE_BASIS[uf];
+      const int8_t uu[3] = { fb.ux, fb.uy, fb.uz };
+      const int8_t vv[3] = { fb.vx, fb.vy, fb.vz };
+      int axes[2] = { 0, 0 };
+      for (int a = 0; a < 3; a++) {
+        if (uu[a]) axes[0] = a;
+        if (vv[a]) axes[1] = a;
+      }
+
       uint16_t cnt = 0;
       for (uint16_t c = 0; c < _cells; c++) {
         uint8_t bx, by, bz;
         posOf(c, bx, by, bz);
         const uint8_t bc[3] = { bx, by, bz };
         bool onRing = false;
-        for (int k = 0; k < na; k++)
-          if (bc[axes[k]] == co[axes[k]]) { onRing = true; break; }
+        for (int k = 0; k < 2 && !onRing; k++) {
+          const int a = axes[k];
+          if (bc[a] != co[a]) continue;
+          // ...and extreme on one of the other two axes, so an extreme `a`
+          // gives that face's perimeter rather than the whole face.
+          for (int o = 0; o < 3; o++) {
+            if (o == a) continue;
+            if (bc[o] == 0 || bc[o] == _n - 1) { onRing = true; break; }
+          }
+        }
         if (!onRing) continue;
         clearBlock(c);                        // the two rings cross; counted once
         cnt++;

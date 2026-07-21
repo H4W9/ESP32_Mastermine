@@ -1303,10 +1303,10 @@ static void gApplyResult(bool changed) {
 
 // A short tap: flag, dig, chord or fire an armed powerup, depending on mode and
 // on what the cell already is.
-static void gTapCell(uint16_t cell, bool longPress) {
+static void gTapCell(uint16_t cell, bool longPress, uint8_t face) {
   if (g_armed >= 0) {
     uint8_t out = 0;
-    if (g_cube.usePowerup((Powerup)g_armed, cell, out)) {
+    if (g_cube.usePowerup((Powerup)g_armed, cell, out, face)) {
       switch (g_armed) {
         case PU_BURST:     g_banner = String("Burst revealed ") + out + " blocks"; break;
         case PU_LIGHTNING: g_banner = String("Lightning revealed ") + out + " blocks"; break;
@@ -1472,8 +1472,9 @@ static void gameScreen() {
         if (backTapped(px, py) || py >= SCRH - NAVH) {
           // header/footer — leave to the release handler
         } else {
-          int cell = g_view.pick(px, py);
-          if (cell >= 0) { gTapCell((uint16_t)cell, true); fired = true; dirty = true; }
+          uint8_t face = CUBE_FACES;
+          int cell = g_view.pick(px, py, &face);
+          if (cell >= 0) { gTapCell((uint16_t)cell, true, face); fired = true; dirty = true; }
         }
       }
     }
@@ -1513,8 +1514,9 @@ static void gameScreen() {
                             gDrawHeader(true); gDrawBanner(); gDrawNav(true); }
         else if (nh == 2) { g_view.resetCamera(); g_view.setZoom(1.0f); }
         else if (py >= G_CUBY && py < G_CUBY + G_CUBH) {
-          int cell = g_view.pick(px, py);
-          if (cell >= 0) gTapCell((uint16_t)cell, false);
+          uint8_t face = CUBE_FACES;
+          int cell = g_view.pick(px, py, &face);
+          if (cell >= 0) gTapCell((uint16_t)cell, false, face);
         }
         gDrawNav();
       } else if (fabsf(velYaw) > 0.4f || fabsf(velPitch) > 0.4f) {
