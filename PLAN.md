@@ -151,14 +151,50 @@ nothing to sort within a block either.
 
 **The cost, measured.** Faces in the interior of a cube face are covered by the
 block in front of them, so the overdraw is real: `preview_cube.py` instruments
-the rasteriser and reports **3.08× pixels written per pixel covered** at n=6.
-(The cap-plus-lips version was never instrumented, so there is no measured
-figure to compare against — but it drew strictly fewer and smaller quads, so
-this is certainly the more expensive of the two.) The simpler model is the
-costlier one here, and it is worth watching on hardware — if the frame rate suffers, the `setFast()` half-resolution
-drag pass is the lever, and a cheap culling rule (skip a face whose outward
-neighbour cell is also a shell block) would recover most of it without
-reintroducing any of the deleted special cases.
+the rasteriser and reports **3.28× pixels written per pixel covered** at n=6
+(with the inner cube and the cull described next; it was 3.78× drawing every
+block honestly with no cull). If the frame rate suffers, `setFast()`
+half-resolution during a drag is the lever.
+
+### The inner cube, and the cull it enables
+
+The shell is hollow, so between the near blocks you could see through the gaps,
+across the empty middle, and out the far side — the blocks behind showed
+through. The fix is a solid **inner cube** filling the centre, spanning
+`[1−g, n−1+g]` on every axis: flush with the inward faces of the shell blocks,
+its edges meeting the inside edges of the edge blocks, painted in the
+background colour.
+
+It is **not free**, and believing it was is what shipped the see-through bug.
+The frame does start as `fillSprite(bg)`, but blocks are drawn between then and
+the moment the gaps matter, so the gaps show the far side until this quad
+erases it. `paintBlocks()` therefore draws in three stages: pass 0 (blocks not
+on a camera-facing face), then `paintInner()`, then pass 1 (blocks on one).
+That split is exactly the occlusion boundary — a pass-0 block has the inner
+cube on its camera side along every axis, a pass-1 block sits outside it on its
+face's axis.
+
+Plugging the middle lets pass 0 be **culled**: a block more than `CULL_DEPTH`
+layers behind every camera-facing face is now hidden by the inner cube and is
+not drawn. `CULL_DEPTH` is **2**, not 0, and that is the subtlety — the
+silhouette is a staircase, so at a yaw off the axis a block a layer or two back
+peeks out *sideways* past the one in front, against the background, where the
+inner cube cannot help. Measured over 264 orientations: dropping pass 0
+entirely leaks at 72 of them, depth 1 at 16, depth 2 at none.
+
+`preview_cube.py --check` proves two separate things. That the cull is safe:
+the culled render is pixel-identical to one that draws every block, at all 264
+orientations, with `CULL_DEPTH` parsed out of the source so setting it too
+shallow fails the suite. And that the inner cube earns its place: painted in
+red instead of `bg`, it covers up to 4320 px at the straight-on view — every
+one a pixel that would otherwise have shown the far side of the cube through a
+gap.
+
+The next lever, if hardware still wants it, is to clip a block's lateral faces
+where a neighbour covers all but a `~2g` strip a moment later — most of the
+remaining overdraw lives there. It needs `paintTile()` to take a texture
+sub-range, and the faces must not be dropped outright: their slivers in the
+gaps are the "I can see the cube's sides" look.
 
 ### Texture orientation is fixed to the face
 
@@ -368,7 +404,7 @@ list. Note **Shuffle is not one of them** and has been dropped:
 
 | | |
 |---|---|
-| **Burst Clear** | reveals a **round** patch two rings across, flagging any mines in it |
+| **Burst Clear** | reveals a **round** patch three rings across, flagging any mines in it |
 | **Lightning** | reveals **two rings at right angles**, each running right around the cube |
 | **Lifesaver** | activate to **arm** it; the next mine you tap is flagged instead of ending the game |
 | **Sonar** | shows the mines within two rings, fading back to hidden over one second |
@@ -379,14 +415,17 @@ explicit choice, and an armed Lifesaver is only consumed when it actually saves
 you. The menu rows show just the name and how many you hold; a **Power-up Info**
 row explains what each one does.
 
-**Burst** walks two rings out over the neighbour graph, then keeps only what is
-within `BURST_RADIUS` (2.5 cells) in 3D. The graph walk bounds the effect and
-wraps a cube edge correctly; the distance test rounds the square off, since the
-far corners of a 5×5 sit at 2.83. 21 blocks at every cube size.
+**Burst** walks `BURST_RINGS` (3) rings out over the neighbour graph, then keeps
+only what is within `BURST_RADIUS` (3.5 cells) in 3D. The graph walk bounds the
+effect and wraps a cube edge correctly; the distance test rounds the square off,
+since the far corner of a 3-ring square sits at 4.24 and drops out. 37 blocks on
+a face interior. (This was two rings / radius 2.5 / 21 blocks; one ring bigger.)
 
-Distance alone is not enough — on a 5-cube a 2.5-radius sphere reaches blocks
-around the edge that are nowhere near two rings away across the surface, and the
-patch ballooned to 33. `check_powerups.py` caught that.
+Distance alone is not enough — on a small cube the sphere reaches blocks around
+the edge that are nowhere near that many rings away across the surface, and the
+patch ballooned (33 for the old two-ring version). `check_powerups.py` caught
+that; it now derives the expected disc from `BURST_RINGS` and `BURST_RADIUS`
+parsed out of `cube.h`, so changing either can't drift from the check.
 
 **No powerup ever removes a mine.** They reveal the safe blocks in their area
 and **flag** the mines, so the puzzle underneath is the same one afterwards —
@@ -394,25 +433,33 @@ Lifesaver included, which flags the mine you tapped rather than defusing it.
 Deleting mines would change every count around the area and quietly rewrite the
 board under the player. `check_powerups.py` enforces it against the source.
 
-**Lightning** reveals the rings through the target on every axis where its
-coordinate is *interior*, up to two. A ring is the shell blocks sharing one
-coordinate; that is 4(n−1) blocks when the coordinate is interior, but a whole
-face when it is 0 or n−1, which is why only interior axes qualify. A
-face-centre block has exactly two — its face's horizontal and vertical — giving
-a cross that wraps the cube twice at right angles and touches all six faces (54
-blocks at n=8). An edge block has one axis, a corner block none and falls back
-to clearing itself.
+**Lightning** reveals two full rings at right angles, in the two directions of
+the **face you tapped** — always, wherever on that face you aim it. That is why
+`pick()` now returns the face as well as the block: an edge block lies on two
+faces and a corner block on three, and "which way is across" is a property of
+the face, not the block.
 
-Both are checked by `sd_prep/check_powerups.py`, which parses `BURST_RADIUS`
-out of `cube.h` and asserts the shapes — including that Burst is round rather
-than square, and that Lightning reaches every face.
+A ring along an axis at a value is the shell blocks with that coordinate that
+*also* have one of their other two coordinates extreme. When the value is
+interior that second clause is automatic and the ring is the 4(n−1) band; when
+it is 0 or n−1 the clause makes it that face's **perimeter** — also 4(n−1),
+also a real ring through the target. That second clause is the whole fix: the
+old rule refused to run a bolt along an extreme axis (it would have been a whole
+face), so it fired only one bolt at an edge and none at a corner. Now both bolts
+are always genuine rings, 54 blocks from a face centre (touching all six faces),
+54 at an edge, 48 at a corner.
+
+Both are checked by `sd_prep/check_powerups.py`, which parses the burst
+constants out of `cube.h` and asserts the shapes — that Burst is the disc those
+constants describe, and that Lightning gives two 4(n−1) rings on **every** face
+of the target, corners included.
 
 The clearing powerups run a **zero-cascade** afterwards. They open blocks
-directly and then rebuild the adjacency counts, and because they *remove* mines,
-blocks that already showed a number can drop to zero. A zero block with hidden
-neighbours is a state ordinary play cannot produce — every zero opened by
-`reveal()` cascades — so without that pass the board is left with pockets that
-should have opened themselves.
+directly rather than through `reveal()`, so a revealed zero can be left sitting
+next to hidden neighbours — a state ordinary play cannot produce, because
+`reveal()` always cascades. Without the pass the board keeps pockets that should
+have opened. (No mine is ever removed, so no count changes — the cascade is
+purely about finishing the flood the direct opens started.)
 
 Sonar's fade is a real cross-fade in the renderer: the block is drawn with the
 mine texture blended towards its normal hidden face, so it dissolves rather than

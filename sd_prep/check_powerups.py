@@ -30,15 +30,27 @@ def parse_float(path, name):
     return float(m.group(1))
 
 
-def burst(target, n, radius, nb):
-    """Mirror of PU_BURST: two rings out over the neighbour graph, then rounded
-    off by 3D distance. The graph walk is what bounds it — distance alone lets
-    the patch leak around a cube edge on a small cube."""
+def parse_int(path, name):
+    src = open(path, encoding="utf-8").read()
+    m = re.search(r"\b%s\s*=\s*(\d+)" % re.escape(name), src)
+    if not m:
+        sys.exit("could not find %s in %s" % (name, path))
+    return int(m.group(1))
+
+
+def burst(target, n, radius, nb, rings):
+    """Mirror of PU_BURST: `rings` rings out over the neighbour graph, then
+    rounded off by 3D distance. The graph walk is what bounds it — distance
+    alone lets the patch leak around a cube edge on a small cube."""
     patch = {target}
-    ring1 = set(nb[target])
-    patch |= ring1
-    for b in ring1:
-        patch |= set(nb[b])
+    frontier = {target}
+    for _ in range(rings):
+        nxt = set()
+        for b in frontier:
+            nxt |= set(nb[b])
+        nxt -= patch
+        patch |= nxt
+        frontier = nxt
     cx, cy, cz = (v + 0.5 for v in target)
     out = []
     for b in patch:
@@ -48,13 +60,35 @@ def burst(target, n, radius, nb):
     return out
 
 
-def lightning(target, n):
-    """Mirror of PU_LIGHTNING: the rings through the target on every axis where
-    its coordinate is interior, up to two."""
-    axes = [a for a in range(3) if 0 < target[a] < n - 1][:2]
-    if not axes:
-        return [target], axes
-    out = [b for b in shell(n) if any(b[a] == target[a] for a in axes)]
+def inplane_axes(face, bases):
+    """The two cube axes that lie IN the given face, from its U and V basis
+    vectors. Each has exactly one non-zero component."""
+    b = bases[face]
+    u, v = b[3:6], b[6:9]
+    au = next(a for a in range(3) if u[a])
+    av = next(a for a in range(3) if v[a])
+    return [au, av]
+
+
+def lightning(target, n, face, bases):
+    """Mirror of PU_LIGHTNING: a ring along each of the APPLIED FACE's two
+    in-plane axes.
+
+    A ring along axis `a` at value `v` is every shell block with coord_a == v
+    that also has one of its other two coordinates extreme. When v is interior
+    that second clause is automatic and the ring is the 4(n-1) band; when v is
+    extreme it is that face's PERIMETER, also 4(n-1). So both directions always
+    give a real ring, at an edge and at a corner too — which is the whole point
+    of keying this on the face rather than on which coordinates are interior."""
+    axes = inplane_axes(face, bases)
+    out = []
+    for b in shell(n):
+        for a in axes:
+            if b[a] != target[a]:
+                continue
+            if any(b[o] in (0, n - 1) for o in range(3) if o != a):
+                out.append(b)
+                break
     return out, axes
 
 
@@ -64,8 +98,10 @@ def main():
     args = ap.parse_args()
     n = args.n
     radius = parse_float(CUBE_H, "BURST_RADIUS")
+    rings = parse_int(CUBE_H, "BURST_RINGS")
     bases = parse_bases(CUBE_CPP)
-    print("n=%d, BURST_RADIUS=%.2f (parsed from cube.h)" % (n, radius))
+    print("n=%d, BURST_RADIUS=%.2f, BURST_RINGS=%d (parsed from cube.h)"
+          % (n, radius, rings))
 
     face_centre = (n // 2, n // 2, 0)
     edge = (n // 2, 0, 0)
@@ -73,24 +109,30 @@ def main():
     nb, _pts, _s = surface_neighbours(n, bases)
 
     # --- Burst -------------------------------------------------------------
-    cells = burst(face_centre, n, radius, nb)
+    cells = burst(face_centre, n, radius, nb, rings)
     assert face_centre in cells, "burst must include the block you tapped"
-    # Round, not square: the four far diagonals of a 5x5 must be outside.
-    for dx, dy in ((2, 2), (2, -2), (-2, 2), (-2, -2)):
-        p = (face_centre[0] + dx, face_centre[1] + dy, 0)
-        assert p not in cells, "burst is square, not round: %r included" % (p,)
-    # ...but the straight two-out and the knight-ish ones are inside.
-    for dx, dy in ((2, 0), (0, 2), (-2, 0), (0, -2), (2, 1), (1, 2)):
-        p = (face_centre[0] + dx, face_centre[1] + dy, 0)
-        assert p in cells, "burst too small: %r missing" % (p,)
-    # 21 regardless of cube size — the graph walk bounds it, so a small cube
-    # does not get a disproportionately huge hole.
-    assert len(cells) == 21, "expected a 21-block disc, got %d" % len(cells)
-    print("  burst on a face centre: %d blocks, round (5x5 corners excluded)  OK"
-          % len(cells))
+    # On a face interior the patch is a disc: every offset within the radius is
+    # in, every offset outside it is out. Derived from the constants, so
+    # changing either in cube.h changes what is expected here.
+    want = set()
+    for dx in range(-rings, rings + 1):
+        for dy in range(-rings, rings + 1):
+            if dx * dx + dy * dy <= radius * radius:
+                want.add((face_centre[0] + dx, face_centre[1] + dy, 0))
+    got = set(cells)
+    assert got == want, ("burst is not the disc the constants describe: "
+                         "missing %r, extra %r"
+                         % (sorted(want - got), sorted(got - want)))
+    # The square's far corner must be excluded, or it is not round at all.
+    corner_off = (rings, rings)
+    assert corner_off[0] ** 2 + corner_off[1] ** 2 > radius * radius, \
+        "BURST_RADIUS %.2f is large enough to admit the square corner at %r " \
+        "- the patch is a square, not a disc" % (radius, corner_off)
+    print("  burst on a face centre: %d blocks, round (%d rings, r=%.1f)  OK"
+          % (len(cells), rings, radius))
 
     # It has to wrap a cube edge without any special case.
-    ecells = burst(edge, n, radius, nb)
+    ecells = burst(edge, n, radius, nb, rings)
     faces_hit = set()
     for b in ecells:
         faces_hit.update(faces_of(b, n, bases))
@@ -99,28 +141,43 @@ def main():
           % (len(ecells), len(faces_hit)))
 
     # --- Lightning ---------------------------------------------------------
-    cells, axes = lightning(face_centre, n)
-    assert len(axes) == 2, "a face-centre block should give two rings, got %r" % axes
-    # Two rings of 4(n-1), overlapping in the 2 blocks where both match.
+    # The property that matters: WHEREVER you aim it, you get two full rings
+    # through the target, in the two directions of the face you tapped. It used
+    # to manage that only in the middle of a face - one bolt at an edge, none at
+    # a corner - which is what the ring-at-an-extreme-axis rule fixes.
     ring = 4 * (n - 1)
-    assert len(cells) == 2 * ring - 2, \
-        "expected %d blocks (two rings less their crossing), got %d" % (2 * ring - 2, len(cells))
-    # The cross must run right around the cube: every face is touched.
+    for name, target in (("a face centre", face_centre),
+                         ("an edge block", edge),
+                         ("a corner block", corner)):
+        for face in sorted(faces_of(target, n, bases)):
+            cells, axes = lightning(target, n, face, bases)
+            assert len(axes) == 2, "%s: expected two axes, got %r" % (name, axes)
+            assert target in cells, \
+                "%s on face %d: the target itself is not in its own bolts" % (name, face)
+
+            # Each direction on its own must be a genuine ring of 4(n-1).
+            for a in axes:
+                one = [b for b in cells if b[a] == target[a]
+                       and any(b[o] in (0, n - 1) for o in range(3) if o != a)]
+                assert len(one) == ring, \
+                    "%s on face %d: the bolt along axis %d is %d blocks, not a " \
+                    "ring of %d" % (name, face, a, len(one), ring)
+
+            # Both bolts must lie in the tapped face, i.e. run along its own
+            # two directions - not off along its normal.
+            normal = [a for a in range(3) if a not in axes][0]
+            assert normal not in axes
+            print("  lightning on %-14s via face %d: %3d blocks, two rings of %d  OK"
+                  % (name, face, len(cells), ring))
+
+    # It must still wrap the whole cube from the middle of a face.
+    cells, _ = lightning(face_centre, n, sorted(faces_of(face_centre, n, bases))[0], bases)
     faces_hit = set()
     for b in cells:
         faces_hit.update(faces_of(b, n, bases))
     assert faces_hit == set(range(6)), \
         "lightning should reach all six faces, reached %r" % sorted(faces_hit)
-    print("  lightning on a face centre: %d blocks, 2 rings, all 6 faces  OK" % len(cells))
-
-    cells, axes = lightning(edge, n)
-    assert len(axes) == 1, "an edge block has one interior axis, got %r" % axes
-    assert len(cells) == ring, "expected one ring of %d, got %d" % (ring, len(cells))
-    print("  lightning on an edge block: one ring of %d  OK" % len(cells))
-
-    cells, axes = lightning(corner, n)
-    assert axes == [] and cells == [corner], "a corner block should fall back to itself"
-    print("  lightning on a corner block: falls back to the block itself  OK")
+    print("  lightning from a face centre still reaches all six faces  OK")
 
     # --- No powerup may remove a mine ---------------------------------------
     # They reveal safe blocks and FLAG mines; the puzzle underneath has to be
@@ -141,6 +198,19 @@ def main():
     reveal_fn = reveal_fn[:reveal_fn.index("\nbool Cube::cycleFlag")]
     assert "&= ~1" not in reveal_fn, "the Lifesaver path still removes the mine"
     print("  no powerup removes a mine; mines are flagged instead  OK")
+
+    # --- No question state --------------------------------------------------
+    # CS_QUESTION let a flagged-then-unflagged block sit in a third state that
+    # reveal() accepted but revealFlood() would not expand, so the block could
+    # never be opened again by hand. Assert it has not crept back.
+    hdr = open(CUBE_H, encoding="utf-8").read()
+    assert "CS_QUESTION" not in hdr and "CS_QUESTION" not in src, \
+        "CS_QUESTION is back - a flag/unflag cycle can strand a block again"
+    cyc = src[src.index("bool Cube::cycleFlag"):]
+    cyc = cyc[:cyc.index("\n}") + 2]
+    assert "CS_HIDDEN" in cyc and "CS_FLAGGED" in cyc, \
+        "cycleFlag should toggle hidden <-> flagged"
+    print("  no question state; unflagging returns a block to CS_HIDDEN  OK")
 
     print("powerup shapes OK")
 
