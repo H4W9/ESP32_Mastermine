@@ -95,6 +95,12 @@ public:
   // Fit the cube to the viewport at zoom 1. Recomputed on attach/resize.
   void refit();
 
+  // Timing of the last render(), in microseconds: project+clear, block fill,
+  // and the SPI pushSprite. For the frame-rate profiler in the game loop.
+  uint32_t usClear()  const { return _usClear; }
+  uint32_t usBlocks() const { return _usBlocks; }
+  uint32_t usPush()   const { return _usPush; }
+
 private:
   struct FaceProj {
     bool    vis;
@@ -177,6 +183,9 @@ private:
   // renderer falls back to plain overdraw.
   uint8_t *_cov = nullptr;
   size_t   _covBytes = 0;
+
+  // Last render()'s per-phase timing, microseconds (see the us*() getters).
+  uint32_t _usClear = 0, _usBlocks = 0, _usPush = 0;
 
   FaceProj _fp[CUBE_FACES];
   // Shading tables, one set per face. Each entry is that channel's PRE-SHIFTED

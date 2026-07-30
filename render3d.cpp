@@ -712,16 +712,24 @@ void CubeView::outlineCell(uint16_t cell) {
 
 void CubeView::render(uint16_t bg) {
   if (!_spr || !_cube || !_cube->ready() || !_skin || !_skin->loaded()) return;
+  // Per-phase timing (microseconds), so the game loop can report where a frame
+  // actually goes instead of us guessing. Cheap — three micros() reads.
+  const uint32_t t0 = micros();
   project();
   _sonarFade = _cube->sonarFade();       // sampled once so a frame is coherent
   _bg = bg;                              // paintInner() fills with it
   _spr->fillSprite(bg);
+  const uint32_t t1 = micros();
   // No face ordering to do: blocks are drawn as solids in voxel order, and a
   // convex solid's own camera-facing faces never overlap each other.
   paintBlocks();
-
   if (_hl >= 0 && _hl < (int)_cube->cells()) outlineCell((uint16_t)_hl);
+  const uint32_t t2 = micros();
   _spr->pushSprite(_vx, _vy);
+  const uint32_t t3 = micros();
+  _usClear  = t1 - t0;                   // project + fillSprite
+  _usBlocks = t2 - t1;                   // paintBlocks + outline
+  _usPush   = t3 - t2;                   // pushSprite over SPI
 }
 
 int CubeView::pick(int panelX, int panelY, uint8_t *faceOut) const {

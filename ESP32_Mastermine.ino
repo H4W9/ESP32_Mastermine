@@ -1436,6 +1436,18 @@ static void gameScreen() {
   const int TOUCH_BRIDGE = 2;
   int lostFrames = 0;
 
+  // Frame-rate profiler. Set MM_PROFILE 0 to remove it. While the cube is in
+  // motion it prints, once a second over Serial, how a frame divides between
+  // the sprite clear, the block fill and the SPI push — so tuning is aimed at
+  // whichever actually dominates instead of guessed at.
+#define MM_PROFILE 1
+#if MM_PROFILE
+  uint32_t profT0 = millis();
+  uint32_t profN = 0, profFrameUs = 0, profWorstUs = 0;
+  uint32_t profClear = 0, profBlocks = 0, profPush = 0;
+  uint32_t profLastFrame = micros();
+#endif
+
   for (;;) {
     int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
     uint8_t n = gTouch(x1, y1, x2, y2);
@@ -1581,13 +1593,53 @@ static void gameScreen() {
     // though nothing is being touched.
     if (g_cube.sonarActive()) dirty = true;
 
+    // While the cube is moving, nothing else may draw to the panel: a drag or a
+    // momentum spin is repainting the whole cube region every frame, and the
+    // header draws straight to the panel over the same SPI bus. Repainting it
+    // mid-motion cost an SPI stall twice a second — a periodic hitch in an
+    // otherwise smooth rotation. Defer it until the cube comes to rest; the
+    // clock/mem readout is never more than a breath stale.
+    const bool moving = dirty && (moved || fabsf(velYaw) > 0.05f ||
+                                  fabsf(velPitch) > 0.05f);
     if (g_banner != lastBanner) { lastBanner = g_banner; gDrawBanner(); }
-    // The clock and mine count only change about once a second; repainting the
-    // header every frame would be a flicker source for no reason.
-    if (now - lastClock > 500) { lastClock = now; gDrawHeader(); }
+    if (!moving && now - lastClock > 500) { lastClock = now; gDrawHeader(); }
 
-    if (dirty) { g_view.render(gameBg()); dirty = false; }
-    delay(4);
+    if (dirty) {
+      g_view.render(gameBg());
+      dirty = false;
+#if MM_PROFILE
+      if (moving) {
+        const uint32_t nowUs = micros();
+        const uint32_t frame = nowUs - profLastFrame;
+        profLastFrame = nowUs;
+        profN++;
+        profFrameUs += frame;
+        if (frame > profWorstUs) profWorstUs = frame;
+        profClear  += g_view.usClear();
+        profBlocks += g_view.usBlocks();
+        profPush   += g_view.usPush();
+      }
+#endif
+    }
+#if MM_PROFILE
+    else {
+      profLastFrame = micros();          // don't count idle gaps as a frame
+    }
+    if (profN && millis() - profT0 >= 1000) {
+      Serial.printf("cube: %lu fps  frame avg %lu us (worst %lu)  "
+                    "clear %lu  blocks %lu  push %lu\n",
+                    (unsigned long)profN,
+                    (unsigned long)(profFrameUs / profN),
+                    (unsigned long)profWorstUs,
+                    (unsigned long)(profClear / profN),
+                    (unsigned long)(profBlocks / profN),
+                    (unsigned long)(profPush / profN));
+      profT0 = millis();
+      profN = profFrameUs = profWorstUs = 0;
+      profClear = profBlocks = profPush = 0;
+    }
+#endif
+    delay(2);
   }
 }
 
