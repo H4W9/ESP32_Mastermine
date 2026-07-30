@@ -54,6 +54,13 @@
 // Section 4. SPI speed
 // ##################################################################################
 
-#define SPI_FREQUENCY       27000000
+// 80 MHz for a smooth cube: Mastermine pushes a full 320x404 sprite every frame
+// while rotating, and at the old 27 MHz that push alone took ~77 ms, capping the
+// frame rate near 13 fps (the "jerky rotation"). 80 MHz cuts it to ~26 ms (~39
+// fps). The other H4W9 firmwares on this panel keep 27 MHz only because they
+// never push a full sprite continuously, so it never limited them.
+// If this shows pixel garbage or flicker on your panel, step down to 60000000
+// or 40000000 — it is a signal-integrity limit of the wiring, not damage.
+#define SPI_FREQUENCY       80000000
 #define SPI_READ_FREQUENCY  20000000
 #define SPI_TOUCH_FREQUENCY  2500000
