@@ -1420,6 +1420,22 @@ static void gameScreen() {
   uint32_t lastT = millis(), lastClock = 0;
   String lastBanner = g_banner;
 
+  // Drag smoothing. The FT6336 updates around 60 Hz while the cube now renders
+  // faster than that, so a raw coordinate read repeats for a few frames and
+  // then jumps when a fresh sample lands; capacitive coordinates also jitter a
+  // few pixels even with the finger still. Driving the rotation from a smoothed
+  // finger position (fx,fy easing toward the raw read) turns both the
+  // stair-steps and the jitter into continuous motion. Higher = snappier and
+  // less smooth; lower = smoother and laggier.
+  const float DRAG_SMOOTH = 0.45f;
+  float fx = 0, fy = 0, pfx = 0, pfy = 0;
+  // Bridge brief capacitive dropouts: the sensor occasionally reports "no
+  // touch" for a single frame mid-drag. Treated as a real lift it would zero
+  // the fling velocity and reset the reference point, chopping the gesture into
+  // a jump. Pretend the last touch persists for up to this many dropped frames.
+  const int TOUCH_BRIDGE = 2;
+  int lostFrames = 0;
+
   for (;;) {
     int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
     uint8_t n = gTouch(x1, y1, x2, y2);
@@ -1428,10 +1444,22 @@ static void gameScreen() {
     if (dt <= 0) dt = 0.001f;
     lastT = now;
 
+    // Bridge a brief single-finger dropout: keep the last touch alive, held at
+    // its last position, so one dropped frame does not end the drag. Only for a
+    // one-finger drag — a pinch would need the second point, which we do not
+    // keep across frames, so a two-finger dropout is left to release normally.
+    if (n == 0 && downN == 1 && lostFrames < TOUCH_BRIDGE) {
+      lostFrames++;
+      n = 1; x1 = px; y1 = py;
+    } else if (n >= 1) {
+      lostFrames = 0;
+    }
+
     // Press edge
     if (n && !downN) {
       px = x1; py = y1; downT = now; moved = false; fired = false;
       velYaw = velPitch = 0;
+      lostFrames = 0;
       if (n >= 2) { pinch0 = hypotf((float)(x2 - x1), (float)(y2 - y1)); zoom0 = g_view.zoom(); }
     }
 
@@ -1452,17 +1480,28 @@ static void gameScreen() {
       }
     } else if (n == 1 && downN) {
       int dx = x1 - px, dy = y1 - py;
-      if (abs(dx) > 5 || abs(dy) > 5) moved = true;
+      if (!moved && (abs(dx) > 5 || abs(dy) > 5)) {
+        // Start the smoother here, at the current point, so the accumulated
+        // pre-move distance is not applied as one initial rotation kick.
+        moved = true;
+        fx = pfx = (float)x1; fy = pfy = (float)y1;
+      }
       if (moved) {
-        // Drag to orbit. Dividing by the viewport makes a full swipe about a
+        // Drag to orbit, driven by the SMOOTHED finger position (see the note
+        // on DRAG_SMOOTH). Dividing by the viewport makes a full swipe about a
         // half turn regardless of panel size. The x term is positive so that
         // dragging right spins the cube's near face to the right, i.e. the
         // surface follows the finger.
-        float dyaw   =  (float)dx * 3.2f / (float)SCRW;
-        float dpitch =  (float)dy * 3.2f / (float)G_CUBH;
+        fx += DRAG_SMOOTH * ((float)x1 - fx);
+        fy += DRAG_SMOOTH * ((float)y1 - fy);
+        float dyaw   = (fx - pfx) * 3.2f / (float)SCRW;
+        float dpitch = (fy - pfy) * 3.2f / (float)G_CUBH;
+        pfx = fx; pfy = fy;
         g_view.orbit(dyaw, dpitch);
-        velYaw   = dyaw / dt;
-        velPitch = dpitch / dt;
+        // Track velocity as an EMA so the fling on release reflects the smoothed
+        // motion, not whatever the last single (possibly held) frame did.
+        velYaw   += 0.4f * (dyaw / dt - velYaw);
+        velPitch += 0.4f * (dpitch / dt - velPitch);
         g_view.setFast(true);
         px = x1; py = y1;
         dirty = true;
