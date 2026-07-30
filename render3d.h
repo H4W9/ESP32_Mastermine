@@ -167,6 +167,17 @@ private:
   float _sonarFade = 0.0f;         // sampled once per frame
   uint16_t _bg = 0;                // this frame's background, for the inner cube
 
+  // Coverage mask for the front-to-back draw: one bit per sprite pixel, set
+  // when that pixel has been written this frame. Because faces are drawn
+  // nearest-first, a set bit means a closer surface already owns the pixel and
+  // the current (farther) one skips it — so every pixel is written once and the
+  // texture sampling behind it is never done twice. Provably identical output
+  // to the old back-to-front overdraw (preview_cube.py asserts it per pixel).
+  // Internal RAM only; nullptr if it would not allocate, in which case the
+  // renderer falls back to plain overdraw.
+  uint8_t *_cov = nullptr;
+  size_t   _covBytes = 0;
+
   FaceProj _fp[CUBE_FACES];
   // Shading tables, one set per face. Each entry is that channel's PRE-SHIFTED
   // contribution to a BYTE-SWAPPED RGB565 word, so `lutR[r]|lutG[g]|lutB[b]`

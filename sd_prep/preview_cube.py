@@ -761,8 +761,100 @@ def run_checks(bases, consts, n=6, w=320, h=380):
                         "first — the voxel loop directions are wrong"
                         % (yaw_d, pitch_d, A, B))
         orders += 1
-    print("  voxel draw order is back-to-front for every shell block "
+    print("  voxel draw order is a valid painter order for every shell block "
           "(%d orientations, %d blocks)  OK" % (orders, len(shell)))
+
+    # FRONT-TO-BACK + COVERAGE MASK is pixel-identical to back-to-front overdraw.
+    #
+    # The firmware draws nearest-first and skips any pixel already written (a
+    # 1-bit coverage mask), so each pixel is written once and no hidden texture
+    # sample is taken. That is only legal if the WINNING surface at every pixel
+    # is the same as the old back-to-front overdraw would have left. Proven here
+    # by giving each (block, face) a unique id, rendering both ways into an id
+    # buffer, and demanding the buffers match — if they do, any texture on those
+    # faces renders identically too.
+    st = demo_states(n)
+    s = 1.0 - 2.0 * g
+
+    def id_buffer(pr, front_to_back):
+        buf = [[-1] * w for _ in range(h)]
+        cov = [bytearray(w) for _ in range(h)] if front_to_back else None
+        vis = pr.visible()
+        rx, ry, rz = pr.rot_bottom_row()
+
+        def rng(sign):
+            fwd = (sign > 0)
+            if front_to_back:
+                fwd = not fwd
+            return range(0, n) if fwd else range(n - 1, -1, -1)
+        xr2, yr2, zr2 = rng(rx), rng(ry), rng(rz)
+
+        def endof(f):
+            return (n - 1) if f["sN"] > 0 else 0
+
+        def paint(ox, oy, ax, ay, bx, by, fid):
+            def put(px_, py_, u, v):
+                if cov is not None:
+                    if cov[py_][px_]:
+                        return
+                    cov[py_][px_] = 1
+                buf[py_][px_] = fid
+            fill_para(ox, oy, ax, ay, bx, by, w, h, put)
+
+        def inner():
+            span = n - 2 + 2 * g
+            tt = g - 1.0
+            for fi in vis:
+                f = pr.faces[fi]
+                ox = f["ox"] + (1 - g) * f["ux"] + (1 - g) * f["vx"] + tt * f["snx"]
+                oy = f["oy"] + (1 - g) * f["uy"] + (1 - g) * f["vy"] + tt * f["sny"]
+                paint(ox, oy, span * f["ux"], span * f["uy"],
+                      span * f["vx"], span * f["vy"], -2)
+
+        def blocks(want_vis):
+            for z in zr2:
+                for y in yr2:
+                    for x in xr2:
+                        blk = (x, y, z)
+                        if blk not in st:
+                            continue
+                        co = (x, y, z)
+                        on = any(co[pr.faces[fi]["aN"]] == endof(pr.faces[fi]) for fi in vis)
+                        if on != want_vis:
+                            continue
+                        if not any(abs(co[pr.faces[fi]["aN"]] - endof(pr.faces[fi])) <= CULL_DEPTH
+                                   for fi in vis):
+                            continue
+                        base = ((x * n + y) * n + z) * 6
+                        for fi in vis:
+                            f = pr.faces[fi]
+                            i, j, cc = co[f["aU"]], co[f["aV"]], co[f["aN"]]
+                            tt = (cc + 1 - g - n) if f["sN"] > 0 else -(cc + g)
+                            ox = f["ox"] + (i + g) * f["ux"] + (j + g) * f["vx"] + tt * f["snx"]
+                            oy = f["oy"] + (i + g) * f["uy"] + (j + g) * f["vy"] + tt * f["sny"]
+                            paint(ox, oy, s * f["ux"], s * f["uy"],
+                                  s * f["vx"], s * f["vy"], base + fi)
+
+        # back-to-front: pass0, inner, pass1.  front-to-back reverses it all.
+        if front_to_back:
+            blocks(True); inner(); blocks(False)
+        else:
+            blocks(False); inner(); blocks(True)
+        return buf
+
+    ft = 0
+    for yaw_d, pitch_d in [(y_, p_) for y_ in range(0, 360, 20)
+                           for p_ in range(-60, 61, 20)]:
+        pr = Projection(bases, consts, n, w, h,
+                        math.radians(yaw_d), math.radians(pitch_d), 1.0)
+        a = id_buffer(pr, False)
+        b = id_buffer(pr, True)
+        d = sum(1 for yy in range(h) for xx in range(w) if a[yy][xx] != b[yy][xx])
+        assert d == 0, ("yaw=%d pitch=%d: front-to-back+coverage changed the "
+                        "winning surface at %d pixels" % (yaw_d, pitch_d, d))
+        ft += 1
+    print("  front-to-back + coverage mask: winning surface identical to "
+          "back-to-front at every pixel (%d orientations)  OK" % ft)
 
     # ...and every block face is the SAME square.
     sizes = {(round(1 - 2 * g, 9), round(1 - 2 * g, 9))}

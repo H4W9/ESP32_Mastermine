@@ -139,22 +139,38 @@ not being drawn as one. Drawing the solid deletes all of them, and the slivers
 of a block visible in the gap between its neighbours are now its real textured
 faces rather than a flat approximation of them.
 
-**Ordering.** Still no z-buffer. For equal, grid-aligned cubes under an
-orthographic camera, block A can occlude B only if A is on the camera side of B
-along *every* axis at once. So a correct back-to-front order is any linear
-extension of that partial order, and nesting the three loops with each axis
-stepping away-from-camera-first (`_rot[6..8]` signs) produces one.
-`preview_cube.py --check` asserts this directly: over several orientations, for
-every ordered pair of shell blocks where A could occlude B, A is drawn later.
-A convex solid's own camera-facing faces never overlap each other, so there is
-nothing to sort within a block either.
+**Ordering.** For equal, grid-aligned cubes under an orthographic camera, block
+A can occlude B only if A is on the camera side of B along *every* axis at once.
+So both a back-to-front and a front-to-back order are just linear extensions of
+that partial order, produced by choosing the direction of the three voxel loops
+(`_rot[6..8]` signs). `preview_cube.py --check` asserts the walk is a valid
+painter order over several orientations.
 
-**The cost, measured.** Faces in the interior of a cube face are covered by the
-block in front of them, so the overdraw is real: `preview_cube.py` instruments
-the rasteriser and reports **3.28× pixels written per pixel covered** at n=6
-(with the inner cube and the cull described next; it was 3.78× drawing every
-block honestly with no cull). If the frame rate suffers, `setFast()`
-half-resolution during a drag is the lever.
+**Front-to-back with a coverage mask — the overdraw is gone.** Drawing
+back-to-front is correct but wasteful: a face in the interior of a cube face is
+almost entirely painted over by the block in front of it, so most texture
+samples and writes are thrown away. Profiling put the waste squarely on the
+lateral (gap-wall) faces — ~90% of their pixels overdrawn — while caps were 0%
+wasted. Clipping was a dead end (the surviving slivers move all over the face
+with the camera angle), so instead the renderer draws **nearest-first** and
+keeps a **1-bit coverage mask**: a pixel already written is skipped, sample and
+all. Each pixel is now written exactly once. Measured fill drops from **3.28× to
+~1.0×**, and on the Pancake that is a PSRAM-bandwidth win as much as a compute
+one — the compositing sprite and the textures both live in PSRAM, whose slow
+random access was the real bottleneck.
+
+This is lossless: the *frontmost opaque surface* wins each pixel either way.
+`preview_cube.py --check` proves it the strong way — it gives every (block,face)
+a unique id, renders an id-buffer both back-to-front and front-to-back+mask, and
+demands they match at every pixel over 126 orientations. If the surface that
+wins a pixel is identical, any texture on it renders identically.
+
+The mask is ~15 KB, allocated in **internal** RAM (a PSRAM mask would defeat its
+own purpose); if it fails to allocate, `_cov` is null, the test macros no-op,
+and the renderer falls back to plain front-to-back overdraw — slower but still
+correct. The old half-resolution `step=2` drag pass is **gone**: full-res
+front-to-back writes fewer pixels than half-res-with-overdraw did, so `_fast`
+now only selects point sampling over bilinear.
 
 ### The inner cube, and the cull it enables
 
@@ -190,11 +206,10 @@ red instead of `bg`, it covers up to 4320 px at the straight-on view — every
 one a pixel that would otherwise have shown the far side of the cube through a
 gap.
 
-The next lever, if hardware still wants it, is to clip a block's lateral faces
-where a neighbour covers all but a `~2g` strip a moment later — most of the
-remaining overdraw lives there. It needs `paintTile()` to take a texture
-sub-range, and the faces must not be dropped outright: their slivers in the
-gaps are the "I can see the cube's sides" look.
+The overdraw the cull leaves behind — mostly the lateral gap-wall faces — is
+removed losslessly by the front-to-back coverage mask described under the
+renderer above, so there is no remaining "clip the slivers" work to do; the
+slivers are simply the pixels the mask lets through.
 
 ### Texture orientation is fixed to the face
 
@@ -300,9 +315,12 @@ every tap or every clock tick. The settings list scrolls inside a sprite for the
 same reason (and because a fixed-offset list overflows the V8's 320 px panel at
 this many rows — a bug inherited from `ESP32_Scrabble` and fixed here).
 
-While a drag or pinch is in flight the renderer runs a half-resolution pass
-(every other scanline, duplicated); the full-resolution frame lands when the
-gesture settles. That is a resolution change, not a flash.
+While a drag or pinch is in flight the renderer point-samples the textures
+instead of bilinear-filtering them (the motion hides the aliasing); the crisp
+bilinear frame lands when the gesture settles. It stays full-resolution
+throughout — the front-to-back coverage mask made the old half-resolution drag
+pass unnecessary, since full-res now writes fewer pixels than the half-res
+overdraw did.
 
 ---
 
@@ -548,9 +566,9 @@ Verified here:
 
 Still to check on hardware:
 * Arduino compile for Pancake, then V8
-* frame rate — the extrusion adds two flat quads per block, so this is the main
-  thing to watch; the half-resolution lever (`CubeView::setFast`) exists if it
-  disappoints
+* frame rate — the front-to-back coverage mask cut fill from ~3.3× to ~1×, so
+  this should be much improved over the first solid-cube build; confirm the drag
+  is smooth and the settle is instant
 * an on-device skin download start to finish
 * a full game to a win and to a loss on 5³, then 12³ for the performance case
 
