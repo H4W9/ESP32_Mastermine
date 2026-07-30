@@ -369,13 +369,22 @@ static inline uint16_t sprSwap(uint16_t c) {
 #define R3D_COV_NEXT() do { if (_cb) { _cm = (uint8_t)(_cm << 1);              \
                                        if (!_cm) { _cm = 1; _cb++; } } } while (0)
 
+// Half-resolution while moving (_fast): rasterize only even scanlines, snapped
+// to a GLOBAL even grid so EVERY tile shares row parity, then render() copies
+// each even row down onto the odd row below it. Snapping is essential — if each
+// tile stepped from its own yTop, tiles would land on mixed parities and the
+// even->odd copy would erase half of them. Costs nothing on the still frame,
+// where _fast is false and this is a plain 1-step loop.
+#define R3D_YSTEP        (_fast ? 2 : 1)
+#define R3D_YSTART(yTop) (_fast ? (((yTop) + 1) & ~1) : (yTop))
+
 // Flat-shaded parallelogram. Only the inner cube uses this.
 void CubeView::fillPara(float px, float py, float ax, float ay,
                         float bx, float by, uint16_t colour) {
   R3D_SPAN_SETUP()
   // One swap for the whole quad — the buffer is byte-reversed, see buildShadeLut.
   colour = sprSwap(colour);
-  for (int y = yTop; y <= yBot; y++) {
+  for (int y = R3D_YSTART(yTop); y <= yBot; y += R3D_YSTEP) {
     R3D_SPAN_ROW(y)
     R3D_COV_ROW()
     uint16_t *dst = _buf + (size_t)y * _vw + xL;
@@ -424,7 +433,7 @@ void CubeView::paintTile(float px, float py, float ax, float ay, float bx, float
   const int32_t sdu = (int32_t)(dudx * ts * 65536.0f);
   const int32_t sdv = (int32_t)(dvdx * ts * 65536.0f);
 
-  for (int y = yTop; y <= yBot; y++) {
+  for (int y = R3D_YSTART(yTop); y <= yBot; y += R3D_YSTEP) {
     R3D_SPAN_ROW(y)
     R3D_COV_ROW()
 
@@ -598,6 +607,14 @@ void CubeView::paintBlocks() {
   }
 
   // One mip per face; every block face on a face is the same size on screen.
+  //
+  // While moving, cap the mip at MOTION_MIP (index 2 = 32 px). The textures
+  // live in PSRAM and point-sampling a zoomed-in 128 px mip means a scattered,
+  // cache-missing PSRAM read per pixel — the single biggest cost in the frame.
+  // A 32 px mip is 2 KB, it stays in cache, and the reads become cheap. The
+  // motion is already point-sampled and soft, so the coarser mip barely shows;
+  // the full mip and bilinear return the instant the cube settles.
+  const uint8_t MOTION_MIP = 2;
   uint8_t lvl[CUBE_FACES];
   int     ts[CUBE_FACES];
   for (uint8_t f = 0; f < CUBE_FACES; f++) {
@@ -605,6 +622,7 @@ void CubeView::paintBlocks() {
     buildShadeLut(f, _fp[f].shade);
     const float side = sqrtf(_fp[f].ux * _fp[f].ux + _fp[f].uy * _fp[f].uy) * s;
     lvl[f] = Skin::levelFor((int)(side + 0.5f));
+    if (_fast && lvl[f] < MOTION_MIP) lvl[f] = MOTION_MIP;
     ts[f]  = Skin::levelSize(lvl[f]);
   }
 
@@ -723,6 +741,15 @@ void CubeView::render(uint16_t bg) {
   // No face ordering to do: blocks are drawn as solids in voxel order, and a
   // convex solid's own camera-facing faces never overlap each other.
   paintBlocks();
+  // Half-resolution motion pass: paintBlocks rasterised only even scanlines,
+  // so fill each odd row from the even row above. One sequential sweep, far
+  // cheaper than the scanlines it let us skip. Done before the outline so the
+  // highlight stays a crisp full-res line on top.
+  if (_fast) {
+    for (int y = 0; y + 1 < _vh; y += 2)
+      memcpy(_buf + (size_t)(y + 1) * _vw, _buf + (size_t)y * _vw,
+             (size_t)_vw * sizeof(uint16_t));
+  }
   if (_hl >= 0 && _hl < (int)_cube->cells()) outlineCell((uint16_t)_hl);
   const uint32_t t2 = micros();
   _spr->pushSprite(_vx, _vy);
