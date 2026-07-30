@@ -355,6 +355,18 @@ static inline uint16_t sprSwap(uint16_t c) {
   return (uint16_t)((c >> 8) | (c << 8));
 }
 
+// A native RGB565 colour with a face's Lambert shade multiplied in, returned
+// native (fillPara byte-swaps it once). Linear per channel — the shading
+// exponents are 1.0 (see buildShadeLut), so this matches the textured path's
+// brightness. Used for the flat-shaded fill while the cube is MOVING.
+static inline uint16_t shadeNative(uint16_t c, float shade) {
+  const uint16_t k = (uint16_t)(shade * 256.0f);
+  uint16_t r = (uint16_t)((((c >> 11) & 0x1F) * k) >> 8);
+  uint16_t g = (uint16_t)((((c >> 5)  & 0x3F) * k) >> 8);
+  uint16_t b = (uint16_t)(((c & 0x1F) * k) >> 8);
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
 // Front-to-back coverage, rolled along a scanline. HIT() is true when a nearer
 // surface already owns this pixel, so we skip both the write AND the texture
 // sample behind it; SET() claims a pixel we do draw; NEXT() advances the bit
@@ -606,24 +618,35 @@ void CubeView::paintBlocks() {
     nCull++;
   }
 
-  // One mip per face; every block face on a face is the same size on screen.
-  //
-  // While moving, cap the mip at MOTION_MIP (index 2 = 32 px). The textures
-  // live in PSRAM and point-sampling a zoomed-in 128 px mip means a scattered,
-  // cache-missing PSRAM read per pixel — the single biggest cost in the frame.
-  // A 32 px mip is 2 KB, it stays in cache, and the reads become cheap. The
-  // motion is already point-sampled and soft, so the coarser mip barely shows;
-  // the full mip and bilinear return the instant the cube settles.
-  const uint8_t MOTION_MIP = 2;
+  // While the cube is MOVING (_fast), each block face is filled with a single
+  // flat, shaded colour — the skin key's average tint — instead of sampling the
+  // texture. Point-sampling PSRAM textures per pixel was the single biggest cost
+  // in a frame (measured); a flat fill needs no texture read at all. The board
+  // state still reads (revealed / hidden / flagged blocks keep their distinct
+  // colours), just without the printed numbers, which return the instant the
+  // cube settles and the full textured render takes over.
+  const bool flatMotion = _fast;
+
   uint8_t lvl[CUBE_FACES];
   int     ts[CUBE_FACES];
-  for (uint8_t f = 0; f < CUBE_FACES; f++) {
-    if (!_fp[f].vis) continue;
-    buildShadeLut(f, _fp[f].shade);
-    const float side = sqrtf(_fp[f].ux * _fp[f].ux + _fp[f].uy * _fp[f].uy) * s;
-    lvl[f] = Skin::levelFor((int)(side + 0.5f));
-    if (_fast && lvl[f] < MOTION_MIP) lvl[f] = MOTION_MIP;
-    ts[f]  = Skin::levelSize(lvl[f]);
+  uint16_t flat[CUBE_FACES][TK_COUNT];
+  if (flatMotion) {
+    uint16_t avg[TK_COUNT];
+    for (uint8_t k = 0; k < TK_COUNT; k++) avg[k] = _skin->averageOf(k);
+    for (uint8_t f = 0; f < CUBE_FACES; f++) {
+      if (!_fp[f].vis) continue;
+      for (uint8_t k = 0; k < TK_COUNT; k++)
+        flat[f][k] = shadeNative(avg[k], _fp[f].shade);
+    }
+  } else {
+    // One mip per face; every block face on a face is the same size on screen.
+    for (uint8_t f = 0; f < CUBE_FACES; f++) {
+      if (!_fp[f].vis) continue;
+      buildShadeLut(f, _fp[f].shade);
+      const float side = sqrtf(_fp[f].ux * _fp[f].ux + _fp[f].uy * _fp[f].uy) * s;
+      lvl[f] = Skin::levelFor((int)(side + 0.5f));
+      ts[f]  = Skin::levelSize(lvl[f]);
+    }
   }
 
   // Front-to-back: pass 1 (nearest) first, then the inner cube, then pass 0.
@@ -675,6 +698,12 @@ void CubeView::paintBlocks() {
           const float ox = p.ox + ((float)i + g) * p.ux + ((float)j + g) * p.vx + t * p.snx;
           const float oy = p.oy + ((float)i + g) * p.uy + ((float)j + g) * p.vy + t * p.sny;
 
+          if (flatMotion) {
+            // Flat shaded fill, no texture read — the fast motion path. (A sonar
+            // ping is a still-frame effect; it reappears when the cube settles.)
+            fillPara(ox, oy, s * p.ux, s * p.uy, s * p.vx, s * p.vy, flat[f][key]);
+            continue;
+          }
           const uint16_t *tex = _skin->level(key, lvl[f]);
           const uint16_t *blend = ping ? tex : nullptr;
           paintTile(ox, oy, s * p.ux, s * p.uy, s * p.vx, s * p.vy, p,
