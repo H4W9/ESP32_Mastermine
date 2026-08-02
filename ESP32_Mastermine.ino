@@ -1155,7 +1155,16 @@ static String fmtClock(uint32_t ms) {
 // to have. Pass force after something else has painted over the header.
 static String g_hdrLast;
 static void gDrawHeader(bool force = false) {
+#ifdef MARAUDER_V8
+  // The 240px header cannot fit the mine count and timer on one line at font 2
+  // without colliding with the memory readout, so they are drawn STACKED at
+  // font 1 — the same size and two-line layout as the DRAM/PSRAM figures.
+  String mineStr  = String(g_cube.minesLeft()) + " mines";
+  String clockStr = fmtClock(g_cube.elapsedMs());
+  String s = mineStr + " " + clockStr;                 // change-detection key
+#else
   String s = String(g_cube.minesLeft()) + "  mines   " + fmtClock(g_cube.elapsedMs());
+#endif
   g_hdrShowBack = true;
   // Even when the title has not changed, the memory figures and status corner
   // are worth refreshing — they are the reason for the periodic call.
@@ -1169,7 +1178,13 @@ static void gDrawHeader(bool force = false) {
   drawHeaderMem();
   tft->setTextColor(COL_FG, COL_ACCENT);
   tft->setTextDatum(MC_DATUM);
-  drawStr(s, (g_hdrMemRight + SCRW - HDR_STATUS_W) / 2, HDRH / 2, 2);
+  const int hdrCx = (g_hdrMemRight + SCRW - HDR_STATUS_W) / 2;
+#ifdef MARAUDER_V8
+  drawStr(mineStr,  hdrCx, HDRH / 2 - 6, 1);
+  drawStr(clockStr, hdrCx, HDRH / 2 + 6, 1);
+#else
+  drawStr(s, hdrCx, HDRH / 2, 2);
+#endif
   tft->setTextDatum(TL_DATUM);
   drawHeaderStatus();
 }
@@ -1368,32 +1383,122 @@ static void gTapCell(uint16_t cell, bool longPress, uint8_t face) {
 
 // What each powerup does, on its own screen rather than crammed into the menu
 // rows — those only have to say what you are holding.
+//
+// The text is taller than the V8's short panel, so the whole thing SCROLLS: the
+// blurbs are wrapped into a flat list of lines once, then a screen-height sprite
+// windows over them as you drag — the same flicker-free pattern the settings
+// list uses. Drag to scroll, tap (without dragging) to go back. On the taller
+// Pancake the content simply fits and there is nothing to scroll.
 static void powerupInfoScreen() {
   tft->fillScreen(COL_BG);
   drawHeader("Power-up Info", true);
-  int y = CONTENTY + 10;
+  const int CY = CONTENTY, viewH = SCRH - CONTENTY;
   const int maxW = SCRW - 28;
-  for (int i = 0; i < PU_COUNT && y < SCRH - 40; i++) {
-    tft->setTextColor(COL_FG, COL_BG);
-    tft->setTextDatum(TL_DATUM);
-    drawStr(PU_NAMES[i], 12, y, 2);
-    y += 18;
-    // Word-wrapped, so a long blurb cannot run off the panel.
-    tft->setTextColor(COL_DIM, COL_BG);
+
+  // Flatten names + word-wrapped blurbs into drawable lines.
+  struct Ln { String t; int x; uint16_t col; int adv; };
+  Ln lines[64];
+  int nL = 0;
+  auto push = [&](const String &t, int x, uint16_t col, int adv) {
+    if (nL < (int)(sizeof(lines) / sizeof(lines[0]))) lines[nL++] = { t, x, col, adv };
+  };
+  for (int i = 0; i < PU_COUNT; i++) {
+    push(PU_NAMES[i], 12, COL_FG, 20);
     String line = "", rest = PU_BLURBS[i];
-    while (rest.length() && y < SCRH - 24) {
+    while (rest.length()) {
       int sp = rest.indexOf(' ');
       String word = (sp < 0) ? rest : rest.substring(0, sp);
       String cand = line.length() ? line + " " + word : word;
       if (strWidth(cand, 2) <= maxW) line = cand;
-      else { drawStr(line, 18, y, 2); y += 16; line = word; }
+      else { push(line, 18, COL_DIM, 16); line = word; }
       rest = (sp < 0) ? "" : rest.substring(sp + 1);
     }
-    if (line.length() && y < SCRH - 24) { drawStr(line, 18, y, 2); y += 16; }
-    y += 6;
+    if (line.length()) push(line, 18, COL_DIM, 16);
+    push("", 0, 0, 8);                    // gap between powerups
   }
-  statusLine("Tap to go back.", COL_DIM);
-  uint16_t x, ty; waitTap(x, ty);
+  int contentH = 10;
+  for (int i = 0; i < nL; i++) contentH += lines[i].adv;
+
+  TFT_eSprite spr(tft);
+  spr.setColorDepth(16);
+  bool haveSpr = (spr.createSprite(SCRW, viewH) != nullptr);
+  sprFont = nullptr;
+
+  // No off-screen buffer: fall back to a static, non-scrolling draw of what
+  // fits — better than a blank screen.
+  if (!haveSpr) {
+    int y = CY + 10;
+    for (int i = 0; i < nL && y < SCRH - 20; i++) {
+      if (lines[i].t.length()) {
+        tft->setTextColor(lines[i].col, COL_BG);
+        tft->setTextDatum(TL_DATUM);
+        drawStr(lines[i].t, lines[i].x, y, 2);
+      }
+      y += lines[i].adv;
+    }
+    statusLine("Tap to go back.", COL_DIM);
+    uint16_t x, ty; waitTap(x, ty);
+    return;
+  }
+
+  float scroll = 0, fling = 0;
+  bool wasDown = false, moved = false;
+  uint16_t pY = 0, lastY = 0;
+  float pScroll = 0, vel = 0;
+  uint32_t lastT = 0;
+
+  auto render = [&]() {
+    float maxS = contentH > viewH ? contentH - viewH : 0;
+    if (scroll < 0) scroll = 0;
+    if (scroll > maxS) scroll = maxS;
+    spr.fillSprite(COL_BG);
+    spr.setTextDatum(TL_DATUM);
+    int y = 10 - (int)scroll;
+    for (int i = 0; i < nL; i++) {
+      if (lines[i].t.length() && y + lines[i].adv > 0 && y < viewH) {
+        spr.setTextColor(lines[i].col, COL_BG);
+        sprStr(spr, sprFont, lines[i].t, lines[i].x, y, 2);
+      }
+      y += lines[i].adv;
+    }
+    sprScrollBar(spr, viewH, contentH, scroll);
+    spr.pushSprite(0, CY);
+  };
+  render();
+
+  for (;;) {
+    touch->run();
+    bool down = touch->isPressed();
+    uint16_t ty = touch->y();
+    uint32_t now = millis();
+    bool need = false;
+
+    if (down && !wasDown) {
+      pY = ty; pScroll = scroll; moved = false; fling = 0; lastY = ty; lastT = now; vel = 0;
+    } else if (down && wasDown) {
+      int dy = (int)pY - (int)ty;
+      if (abs(dy) > 6) moved = true;
+      scroll = pScroll + dy;
+      uint32_t dt = now - lastT;
+      if (dt > 0) { vel = (float)((int)lastY - (int)ty) / (float)dt * 1000.0f; lastY = ty; lastT = now; }
+      need = true;
+    } else if (!down && wasDown) {
+      if (!moved) { spr.deleteSprite(); return; }   // a plain tap leaves
+      fling = vel;
+      need = true;
+    } else if (fabs(fling) > 25) {
+      scroll += fling * 0.016f;
+      fling *= 0.95f;
+      need = true;
+    } else {
+      fling = 0;
+    }
+
+    wasDown = down;
+    if (need) render();
+    Sfx::update();
+    delay(12);
+  }
 }
 
 static void powerupDialog() {
