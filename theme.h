@@ -87,6 +87,7 @@ struct Theme {
   uint8_t theme_idx  = PW_THEME_SLATE;
   uint8_t bright     = 15;                     // screen backlight, 0..19
   uint8_t led_bright = 4;                      // RGB status LED, 0..20 (0 = off)
+  bool    sound      = true;                   // buzzer sound effects on/off
   uint8_t acc_by_theme[PW_THEME_COUNT];        // 0 = Default (themeHighlight), else accent+1
   uint8_t fc_by_theme[PW_THEME_COUNT];         // 0 = Default (theme fg), else PW_FONTCOL_VAL idx
 
@@ -161,7 +162,7 @@ struct Theme {
   }
 
   void defaults() {
-    theme_idx = PW_THEME_SLATE; bright = 15; led_bright = 4;
+    theme_idx = PW_THEME_SLATE; bright = 15; led_bright = 4; sound = true;
     for (uint8_t i = 0; i < PW_THEME_COUNT; i++) { acc_by_theme[i] = 0; fc_by_theme[i] = 0; }
     // Slate reads flat under the generic bg->fg blend, so give it an explicit
     // accent (PW_ACCENT_NAMES[7] = "Blue").
@@ -176,6 +177,7 @@ struct Theme {
       f.read(acc_by_theme, PW_THEME_COUNT);
       f.read(fc_by_theme, PW_THEME_COUNT);
       if (f.available() > 0) led_bright = (uint8_t)f.read();   // newer files append this
+      if (f.available() > 0) sound = (f.read() != 0);          // ...and this, newer still
     }
     if (f) f.close();
     if (theme_idx >= PW_THEME_COUNT) theme_idx = PW_THEME_SLATE;
@@ -194,6 +196,7 @@ struct Theme {
     f.write(acc_by_theme, PW_THEME_COUNT);
     f.write(fc_by_theme, PW_THEME_COUNT);
     f.write(led_bright);
+    f.write(sound ? 1 : 0);
     f.close();
   }
 };

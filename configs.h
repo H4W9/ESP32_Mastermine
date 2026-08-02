@@ -71,6 +71,11 @@
   #define CTP_RST  8
   #define CTP_SDA  I2C_SDA
   #define CTP_SCL  I2C_SCL
+
+  // Passive buzzer for sound effects (LEDC square-wave tone). Passive = it needs
+  // a driven frequency, not just a level, which is what ledcWriteTone provides.
+  #define HAS_BUZZER
+  #define BUZZER_PIN  6
 #endif
 
 // MARAUDER_V8

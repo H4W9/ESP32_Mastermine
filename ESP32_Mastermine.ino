@@ -47,6 +47,7 @@
 #include "skin.h"
 #include "skinstore.h"
 #include "render3d.h"
+#include "sfx.h"
 
 // Picoware core (panel init, touch).
 #include "src/Picoware/internal/boards.hpp"
@@ -1290,11 +1291,14 @@ static void gApplyResult(bool changed) {
   if (!changed) return;
   // Lifesaver is passive — reveal() spends it on its own, so the only place it
   // can be reported is here, after the fact.
-  if (g_cube.takeLifesaverUsed()) g_banner = "Lifesaver! Mine flagged.";
-  if (g_cube.state() == GS_WON)
+  if (g_cube.takeLifesaverUsed()) { g_banner = "Lifesaver! Mine flagged."; Sfx::play(Sfx::LIFE_SAVE); }
+  if (g_cube.state() == GS_WON) {
     g_banner = String("Solved in ") + fmtClock(g_cube.elapsedMs()) + "!";
+    Sfx::play(Sfx::WIN);
+  }
   if (g_cube.state() == GS_LOST) {
     g_banner = "Boom.";
+    Sfx::play(Sfx::BOOM);
     // Ring the mine that actually went off, so it is obvious which tap lost it.
     for (uint16_t c = 0; c < g_cube.cells(); c++)
       if (g_cube.isBoom(c)) { g_view.setHighlight((int)c, TFT_RED); break; }
@@ -1308,10 +1312,13 @@ static void gTapCell(uint16_t cell, bool longPress, uint8_t face) {
     uint8_t out = 0;
     if (g_cube.usePowerup((Powerup)g_armed, cell, out, face)) {
       switch (g_armed) {
-        case PU_BURST:     g_banner = String("Burst revealed ") + out + " blocks"; break;
-        case PU_LIGHTNING: g_banner = String("Lightning revealed ") + out + " blocks"; break;
+        case PU_BURST:     g_banner = String("Burst revealed ") + out + " blocks";
+                           Sfx::play(Sfx::BURST); break;
+        case PU_LIGHTNING: g_banner = String("Lightning revealed ") + out + " blocks";
+                           Sfx::play(Sfx::LIGHTNING); break;
         case PU_SONAR:     g_banner = (out == 0) ? String("Sonar: all clear")
-                                                 : String("Sonar: ") + out + " mines"; break;
+                                                 : String("Sonar: ") + out + " mines";
+                           Sfx::play(Sfx::SONAR); break;
         default:           g_banner = "Used"; break;
       }
     } else {
@@ -1324,13 +1331,27 @@ static void gTapCell(uint16_t cell, bool longPress, uint8_t face) {
   // The reference game's Controls screen maps REVEAL and CHORDING to the SAME
   // gesture (both "Hold") and FLAG to the other one — chording is not a
   // separate gesture, it is what a reveal means on an already-revealed number.
-  if (!longPress) { gApplyResult(g_cube.cycleFlag(cell)); return; }
-
-  if (g_cube.stateOf(cell) == CS_REVEALED) {
-    if (g_cube.adj(cell) > 0) gApplyResult(g_cube.chord(cell));
+  //
+  // Each action plays its own tick; a BOOM or WIN from gApplyResult is a
+  // priority sound, so it pre-empts the tick when the move ends the game.
+  if (!longPress) {
+    bool ch = g_cube.cycleFlag(cell);
+    if (ch) Sfx::play(Sfx::FLAG);
+    gApplyResult(ch);
     return;
   }
-  gApplyResult(g_cube.reveal(cell));
+
+  if (g_cube.stateOf(cell) == CS_REVEALED) {
+    if (g_cube.adj(cell) > 0) {
+      bool ch = g_cube.chord(cell);
+      if (ch) Sfx::play(Sfx::CHORD);
+      gApplyResult(ch);
+    }
+    return;
+  }
+  bool ch = g_cube.reveal(cell);
+  if (ch) Sfx::play(Sfx::REVEAL);
+  gApplyResult(ch);
 }
 
 // What each powerup does, on its own screen rather than crammed into the menu
@@ -1380,7 +1401,7 @@ static void powerupDialog() {
   // never spent without the player asking for it.
   if (!g_cube.needsTarget((Powerup)sel)) {
     uint8_t out = 0;
-    if (g_cube.usePowerup(PU_LIFESAVER, 0, out)) g_banner = "Lifesaver armed";
+    if (g_cube.usePowerup(PU_LIFESAVER, 0, out)) { g_banner = "Lifesaver armed"; Sfx::play(Sfx::LIFE_ARM); }
     else g_banner = out ? "Lifesaver already armed" : "Not yet - make a move first";
     g_armed = -1;
     return;
@@ -1639,6 +1660,7 @@ static void gameScreen() {
       profClear = profBlocks = profPush = 0;
     }
 #endif
+    Sfx::update();
     delay(2);
   }
 }
@@ -1757,11 +1779,11 @@ static void aboutScreen() {
 }
 
 #ifdef HAS_CAP_TOUCH
-static const int SET_N = 12;
-#else
 static const int SET_N = 13;
+#else
+static const int SET_N = 14;
 #endif
-static const int SET_CHIP_LAST = 8;    // rows 0..8 carry chips (3 is an info row)
+static const int SET_CHIP_LAST = 9;    // rows 0..9 carry chips (3 is an info row)
 
 static String setChipVal(int row) {
   switch (row) {
@@ -1775,6 +1797,7 @@ static String setChipVal(int row) {
     case 6: return String(curMines()) + "/" + cubeCellCount(curN());
     case 7: return String(theme.bright + 1) + "/20";
     case 8: return String(theme.led_bright) + "/20";
+    case 9: return theme.sound ? "On" : "Off";
   }
   return "";
 }
@@ -1790,11 +1813,12 @@ static void drawSettingRowSpr(TFT_eSprite &g, int row, int y) {
     case 6: sprChipRow(g, y, "Mines",      setChipVal(6), true,  0, row); break;
     case 7: sprChipRow(g, y, "Brightness", setChipVal(7), true,  0, row); break;
     case 8: sprChipRow(g, y, "LED",        setChipVal(8), true,  0, row); break;
-    case 9:  sprInfoRow(g, y, "WiFi Setup", WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String(""), row); break;
-    case 10: sprInfoRow(g, y, "WiFi Debug", "", row); break;
-    case 11: sprInfoRow(g, y, "About",      "", row); break;
+    case 9: sprChipRow(g, y, "Sound",      setChipVal(9), false, 0, row); break;
+    case 10: sprInfoRow(g, y, "WiFi Setup", WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String(""), row); break;
+    case 11: sprInfoRow(g, y, "WiFi Debug", "", row); break;
+    case 12: sprInfoRow(g, y, "About",      "", row); break;
 #ifndef HAS_CAP_TOUCH
-    case 12: sprInfoRow(g, y, "Calibrate Touch", "", row); break;
+    case 13: sprInfoRow(g, y, "Calibrate Touch", "", row); break;
 #endif
   }
 }
@@ -1916,23 +1940,26 @@ static void settingsFlow() {
             case 8: if (h == 0 && theme.led_bright > 0)  theme.led_bright--;
                     else if (h == 1 && theme.led_bright < 20) theme.led_bright++;
                     if (h >= 0) { theme.save(); ledWifi(); } break;
-            case 9:  if (haveSpr) spr.deleteSprite();
+            case 9: if (h >= 0) { theme.sound = !theme.sound; theme.save();
+                                  Sfx::setEnabled(theme.sound);
+                                  if (theme.sound) Sfx::play(Sfx::LIFE_ARM); } break;
+            case 10: if (haveSpr) spr.deleteSprite();
                      wifiSetup();
                      tft->fillScreen(COL_BG); drawHeader("Settings", true);
                      if (haveSpr) { haveSpr = (spr.createSprite(SCRW, CH) != nullptr); sprFont = nullptr; }
                      break;
-            case 10: if (haveSpr) spr.deleteSprite();
+            case 11: if (haveSpr) spr.deleteSprite();
                      wifiDebug();
                      tft->fillScreen(COL_BG); drawHeader("Settings", true);
                      if (haveSpr) { haveSpr = (spr.createSprite(SCRW, CH) != nullptr); sprFont = nullptr; }
                      break;
-            case 11: if (haveSpr) spr.deleteSprite();
+            case 12: if (haveSpr) spr.deleteSprite();
                      aboutScreen();
                      tft->fillScreen(COL_BG); drawHeader("Settings", true);
                      if (haveSpr) { haveSpr = (spr.createSprite(SCRW, CH) != nullptr); sprFont = nullptr; }
                      break;
 #ifndef HAS_CAP_TOUCH
-            case 12: if (haveSpr) spr.deleteSprite();
+            case 13: if (haveSpr) spr.deleteSprite();
                      touchCalRun();
                      tft->fillScreen(COL_BG); drawHeader("Settings", true);
                      if (haveSpr) { haveSpr = (spr.createSprite(SCRW, CH) != nullptr); sprFont = nullptr; }
@@ -1955,6 +1982,7 @@ static void settingsFlow() {
 
     wasDown = down;
     if (need) render();
+    Sfx::update();
     delay(12);
   }
 }
@@ -2109,6 +2137,9 @@ void setup() {
   theme.load();
   cfgLoad();
 
+  Sfx::init();
+  Sfx::setEnabled(theme.sound);
+
   ledOff();
 
 #ifdef MARAUDER_V8
@@ -2154,6 +2185,7 @@ void setup() {
 void loop() {
   vm->run();
   wifiBgTick();
+  Sfx::update();
 
   // Reconnect watchdog: ONLY on the drop edge (connected -> lost), make one
   // reconnect pass. If it fails we stay disconnected rather than retrying
