@@ -22,7 +22,9 @@ enum Event : uint8_t {
   LIGHTNING,    // Lightning powerup - zap crackle
   LIFE_ARM,     // Lifesaver armed - ready two-step
   LIFE_SAVE,    // Lifesaver spent a mine - relief resolve
-  SONAR,        // Sonar ping - single blip
+  SONAR,        // Sonar ping - rising ping with an echo
+  MODE_ENTER,   // opened a menu item / screen - ascending pair
+  MODE_EXIT,    // backed out of a screen - descending pair
   CLICK         // generic UI tap
 };
 

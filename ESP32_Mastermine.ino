@@ -1234,12 +1234,21 @@ static void gDrawNav(bool force = false) {
 // Pause: a small modal over the cube. Returns true to resume, false to leave
 // for the main menu. The clock is not stopped — the reference does not either,
 // and stopping it would make Pause a way to game the timer.
-static bool pauseDialog() {
-  const int bw = SCRW - 72, bh = 46, bx = 36;
-  const int y0 = SCRH / 2 - 60, y1 = SCRH / 2 + 4;
+// Return values for pauseDialog. Kept as plain ints (not an enum return type):
+// Arduino's ctags prototype pass inserts the prototype above any .ino-local enum
+// definition, so an enum RETURN type there fails to compile — see the same rule
+// for structs in the build notes.
+static const int PA_RESUME = 0, PA_NEWGAME = 1, PA_MENU = 2;
 
-  tft->fillRoundRect(20, y0 - 54, SCRW - 40, 190, 10, COL_BG);
-  tft->drawRoundRect(20, y0 - 54, SCRW - 40, 190, 10, theme.neon(2, COL_DIM));
+static int pauseDialog() {
+  const int bw = SCRW - 72, bh = 44, bx = 36, gap = 12;
+  const int y0 = SCRH / 2 - 72;                 // Resume
+  const int y1 = y0 + bh + gap;                 // New Game (middle)
+  const int y2 = y1 + bh + gap;                 // Back to Menu
+  const int boxTop = y0 - 54, boxH = (y2 + bh) - boxTop + 16;
+
+  tft->fillRoundRect(20, boxTop, SCRW - 40, boxH, 10, COL_BG);
+  tft->drawRoundRect(20, boxTop, SCRW - 40, boxH, 10, theme.neon(2, COL_DIM));
   tft->setTextColor(COL_FG, COL_BG);
   tft->setTextDatum(MC_DATUM);
   drawStr("Paused", SCRW / 2, y0 - 26, 4);
@@ -1254,16 +1263,19 @@ static bool pauseDialog() {
     tft->setTextDatum(TL_DATUM);
   };
   button(y0, "Resume", 1);
-  button(y1, "Back to Menu", 5);
+  button(y1, "New Game", 3);
+  button(y2, "Back to Menu", 5);
 
   for (;;) {
     uint16_t x, y;
     if (!waitTap(x, y)) continue;
-    if ((int)y >= y0 && (int)y < y0 + bh && (int)x >= bx && (int)x < bx + bw) return true;
-    if ((int)y >= y1 && (int)y < y1 + bh && (int)x >= bx && (int)x < bx + bw) return false;
-    // A tap anywhere else dismisses it, which is what a modal like this should
-    // do rather than trapping the player.
-    if ((int)y < y0 - 54 || (int)y > y0 - 54 + 190) return true;
+    const bool inCol = ((int)x >= bx && (int)x < bx + bw);
+    if (inCol && (int)y >= y0 && (int)y < y0 + bh) { Sfx::play(Sfx::MODE_EXIT);  return PA_RESUME; }
+    if (inCol && (int)y >= y1 && (int)y < y1 + bh) { Sfx::play(Sfx::MODE_ENTER); return PA_NEWGAME; }
+    if (inCol && (int)y >= y2 && (int)y < y2 + bh) { Sfx::play(Sfx::MODE_EXIT);  return PA_MENU; }
+    // A tap anywhere outside the box dismisses it — a modal should not trap the
+    // player — which counts as Resume.
+    if ((int)y < boxTop || (int)y > boxTop + boxH) return PA_RESUME;
   }
 }
 
@@ -1573,9 +1585,24 @@ static void gameScreen() {
 #endif
         int nh = navHit(px, py);
         if (nh == 0) {
-          bool resume = pauseDialog();
-          g_cube.save(SAVE_DIR "/auto.sav");
-          if (!resume) { g_view.setHighlight(-1, 0); return; }
+          int pa = pauseDialog();
+          if (pa == PA_MENU) {
+            g_cube.save(SAVE_DIR "/auto.sav");
+            g_view.setHighlight(-1, 0);
+            return;
+          }
+          if (pa == PA_NEWGAME) {
+            // Build a fresh board with the current difficulty and play on. The
+            // new game autosaves on its own exit, so the old one is simply
+            // replaced — no point checkpointing it first.
+            if (!startGame()) { g_view.setHighlight(-1, 0); return; }
+            g_view.setHighlight(-1, 0);
+            g_view.refit();
+            g_view.resetCamera();
+            g_view.setZoom(1.0f);
+          } else {
+            g_cube.save(SAVE_DIR "/auto.sav");   // Resume: checkpoint
+          }
           tft->fillScreen(gameBg());
           gDrawHeader(true); gDrawBanner(); gDrawNav(true);
           dirty = true;
@@ -2064,7 +2091,7 @@ static void mainMenuRun(ViewManager *viewManager) {
   if (down && !wasDown) {
     uint16_t x = t->x(), y = t->y();
     int btn = menuButtonAt(x, y);
-    if (btn >= 0) openMenuItem(btn);
+    if (btn >= 0) { Sfx::play(Sfx::MODE_ENTER); openMenuItem(btn); }
   }
   wasDown = down;
 

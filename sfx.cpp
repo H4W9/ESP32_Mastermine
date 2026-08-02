@@ -12,26 +12,41 @@ namespace Sfx {
 // One step of an effect. freq 0 = silent step; duration 0 = END of sequence.
 struct Note { uint16_t freq, duration, pause; };
 
-// REVEAL: soft short tick.
-static const Note SND_REVEAL[]    = { {1200, 8, 0}, {0, 0, 0} };
-// FLAG: lower, cushioned click.
-static const Note SND_FLAG[]      = { {700, 10, 0}, {0, 0, 0} };
-// CHORD: quick double tick.
-static const Note SND_CHORD[]     = { {900, 8, 6}, {1200, 8, 0}, {0, 0, 0} };
-// BOOM: falling explosion, ends on a low thud.
-static const Note SND_BOOM[]      = { {500, 25, 0}, {300, 45, 0}, {180, 70, 0}, {90, 170, 0}, {0, 0, 0} };
-// WIN: ascending fanfare with a held resolve.
-static const Note SND_WIN[]       = { {600, 90, 25}, {800, 90, 25}, {1000, 90, 25}, {1350, 200, 0}, {0, 0, 0} };
-// BURST: rising pop.
-static const Note SND_BURST[]     = { {500, 18, 0}, {800, 18, 0}, {1200, 22, 0}, {1600, 40, 0}, {0, 0, 0} };
-// LIGHTNING: bright zap crackle.
-static const Note SND_LIGHTNING[] = { {1900, 14, 0}, {1200, 14, 0}, {1700, 12, 0}, {800, 34, 0}, {0, 0, 0} };
-// LIFE_ARM: ready two-step, rising.
-static const Note SND_LIFE_ARM[]  = { {900, 40, 12}, {1200, 55, 0}, {0, 0, 0} };
-// LIFE_SAVE: relief, resolves back down.
-static const Note SND_LIFE_SAVE[] = { {1000, 45, 8}, {1300, 55, 8}, {1050, 95, 0}, {0, 0, 0} };
-// SONAR: single blip.
-static const Note SND_SONAR[]     = { {1150, 22, 0}, {0, 0, 0} };
+// A passive buzzer is one square-wave voice, so "richer" means more notes,
+// little pitch wobbles and a resolve at the end — the same trick Porkchop's
+// sequences use to give a single beeper some personality.
+
+// REVEAL: a quick soft up-chirp — light, because it fires on every dig.
+static const Note SND_REVEAL[]    = { {1250, 7, 0}, {1650, 6, 0}, {0, 0, 0} };
+// FLAG: plant it — low then a small pop up.
+static const Note SND_FLAG[]      = { {620, 10, 3}, {880, 8, 0}, {0, 0, 0} };
+// CHORD: opens several at once — a bright little three-note run.
+static const Note SND_CHORD[]     = { {900, 7, 3}, {1200, 7, 3}, {1550, 9, 0}, {0, 0, 0} };
+// BOOM: a real explosion — bright crack, then a wobbling descent into sub-bass.
+static const Note SND_BOOM[]      = { {820, 14, 0}, {520, 22, 0}, {300, 34, 0},
+                                      {360, 20, 0}, {200, 50, 0}, {120, 80, 0},
+                                      {150, 30, 0}, {80, 150, 0}, {0, 0, 0} };
+// WIN: a climbing fanfare that peaks then resolves down — the satisfying "done".
+static const Note SND_WIN[]       = { {600, 80, 16}, {760, 80, 16}, {1010, 80, 16},
+                                      {1280, 90, 16}, {1600, 130, 22}, {1280, 170, 0}, {0, 0, 0} };
+// BURST: rising pop with a sparkle tail.
+static const Note SND_BURST[]     = { {480, 15, 0}, {720, 15, 0}, {1040, 16, 0},
+                                      {1420, 20, 0}, {1820, 34, 0}, {1520, 22, 0}, {0, 0, 0} };
+// LIGHTNING: erratic high crackle that snaps down — a zap.
+static const Note SND_LIGHTNING[] = { {2000, 11, 0}, {1450, 9, 0}, {1900, 9, 0},
+                                      {1150, 11, 0}, {1700, 9, 0}, {900, 14, 0}, {560, 30, 0}, {0, 0, 0} };
+// LIFE_ARM: three-step confident rise — "ready".
+static const Note SND_LIFE_ARM[]  = { {700, 34, 8}, {950, 38, 8}, {1250, 60, 0}, {0, 0, 0} };
+// LIFE_SAVE: relief — rises high, then a warm resolve down.
+static const Note SND_LIFE_SAVE[] = { {900, 38, 6}, {1200, 42, 6}, {1520, 55, 10}, {1150, 120, 0}, {0, 0, 0} };
+// SONAR: a classic ping — a fast rise to a held blip, then a spaced fainter
+// echo and a low fade. The gaps are the "distance".
+static const Note SND_SONAR[]     = { {900, 8, 0}, {1650, 20, 55}, {1500, 12, 120},
+                                      {1150, 10, 0}, {0, 0, 0} };
+// MODE_ENTER: stepping into a screen — quick ascending pair.
+static const Note SND_MODE_ENTER[] = { {700, 30, 10}, {1000, 42, 0}, {0, 0, 0} };
+// MODE_EXIT: backing out — quick descending pair.
+static const Note SND_MODE_EXIT[]  = { {950, 30, 10}, {620, 42, 0}, {0, 0, 0} };
 // CLICK: minimal UI tap.
 static const Note SND_CLICK[]     = { {1050, 6, 0}, {0, 0, 0} };
 
@@ -47,6 +62,8 @@ static const Note *seqFor(Event e) {
     case LIFE_ARM:  return SND_LIFE_ARM;
     case LIFE_SAVE: return SND_LIFE_SAVE;
     case SONAR:     return SND_SONAR;
+    case MODE_ENTER: return SND_MODE_ENTER;
+    case MODE_EXIT:  return SND_MODE_EXIT;
     case CLICK:     return SND_CLICK;
     default:        return nullptr;
   }
